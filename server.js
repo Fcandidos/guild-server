@@ -1,0 +1,287 @@
+// ═══════════════════════════════════════════════════════════════
+//  GUILD SVE — Servidor Node.js + Firebase Admin SDK
+//  Render (ou qualquer VPS) · Porta: process.env.PORT ou 3001
+//
+//  Rotas protegidas exigem header:
+//    Authorization: Bearer <idToken do admin logado no browser>
+//
+//  Variáveis de ambiente necessárias (.env ou Render Environment):
+//    FIREBASE_PROJECT_ID
+//    FIREBASE_CLIENT_EMAIL
+//    FIREBASE_PRIVATE_KEY    (com \n reais — veja .env.example)
+//    ADMIN_EMAIL             (email do admin master)
+//    ALLOWED_ORIGIN          (URL do seu site, ex: https://seu-site.com)
+// ═══════════════════════════════════════════════════════════════
+
+require('dotenv').config();
+const express    = require('express');
+const cors       = require('cors');
+const admin      = require('firebase-admin');
+
+// ── Inicializa Firebase Admin ──────────────────────────────────
+const serviceAccount = {
+  type:                        'service_account',
+  project_id:                  process.env.FIREBASE_PROJECT_ID,
+  client_email:                process.env.FIREBASE_CLIENT_EMAIL,
+  // A private key vem como string com \n literais no .env — converte de volta
+  private_key:                 process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+};
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const auth = admin.auth();
+const db   = admin.firestore();
+
+// ── Express ────────────────────────────────────────────────────
+const app  = express();
+const PORT = process.env.PORT || 3001;
+
+app.use(express.json());
+
+// CORS — só aceita requisições do seu site
+const allowedOrigin = process.env.ALLOWED_ORIGIN || '*';
+app.use(cors({
+  origin: allowedOrigin,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// ── Middleware: verifica token + garante que é admin ───────────
+async function requireAdmin(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+
+  try {
+    const decoded    = await auth.verifyIdToken(token);
+    const adminEmail = process.env.ADMIN_EMAIL || '';
+
+    if (decoded.email.toLowerCase() !== adminEmail.toLowerCase()) {
+      return res.status(403).json({ error: 'Acesso negado — não é administrador' });
+    }
+
+    req.adminUid   = decoded.uid;
+    req.adminEmail = decoded.email;
+    next();
+  } catch (e) {
+    console.error('[AUTH] Token inválido:', e.message);
+    return res.status(401).json({ error: 'Token inválido ou expirado' });
+  }
+}
+
+// ── Middleware: verifica token (qualquer usuário autenticado) ──
+async function requireAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+
+  try {
+    req.decodedToken = await auth.verifyIdToken(token);
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Token inválido ou expirado' });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  ROTAS
+// ════════════════════════════════════════════════════════════════
+
+// ── Health check ──────────────────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', project: process.env.FIREBASE_PROJECT_ID });
+});
+
+// ── GET /api/users — lista usuários (admin) ───────────────────
+app.get('/api/users', requireAdmin, async (req, res) => {
+  try {
+    const snap  = await db.collection('guild_users').get();
+    const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ users });
+  } catch (e) {
+    console.error('[GET /api/users]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/users — cria usuário (admin) ────────────────────
+//  Body: { name, email, password, guildName }
+app.post('/api/users', requireAdmin, async (req, res) => {
+  const { name, email, password, guildName } = req.body;
+
+  if (!name || !email || !password || !guildName) {
+    return res.status(400).json({ error: 'Campos obrigatórios: name, email, password, guildName' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'Senha mínima: 6 caracteres' });
+  }
+
+  const adminEmail = process.env.ADMIN_EMAIL || '';
+  if (email.toLowerCase() === adminEmail.toLowerCase()) {
+    return res.status(400).json({ error: 'E-mail reservado para o administrador' });
+  }
+
+  try {
+    // 1. Cria no Firebase Auth
+    const userRecord = await auth.createUser({
+      email,
+      password,
+      displayName: name,
+    });
+
+    // 2. Salva dados extras no Firestore
+    const docRef = await db.collection('guild_users').add({
+      uid:         userRecord.uid,
+      name,
+      email:       email.toLowerCase(),
+      guildName:   guildName.toUpperCase(),
+      createdAt:   new Date().toLocaleDateString('pt-BR'),
+      firstAccess: true,
+    });
+
+    res.status(201).json({
+      message: 'Usuário criado com sucesso',
+      id:      docRef.id,
+      uid:     userRecord.uid,
+    });
+
+  } catch (e) {
+    console.error('[POST /api/users]', e);
+    const fbErrs = {
+      'auth/email-already-exists':  'E-mail já cadastrado no Firebase',
+      'auth/invalid-email':         'E-mail inválido',
+      'auth/invalid-password':      'Senha muito fraca (mín. 6 caracteres)',
+    };
+    res.status(400).json({ error: fbErrs[e.code] || e.message });
+  }
+});
+
+// ── DELETE /api/users/:id — remove usuário (admin) ────────────
+//  :id = id do documento Firestore (não o uid do Auth)
+app.delete('/api/users/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const docRef  = db.collection('guild_users').doc(id);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: 'Usuário não encontrado no Firestore' });
+    }
+
+    const { uid } = docSnap.data();
+
+    // 1. Remove do Firebase Auth
+    if (uid) {
+      try { await auth.deleteUser(uid); }
+      catch (e) { console.warn('[DELETE] Auth user not found, continuing:', e.message); }
+    }
+
+    // 2. Remove do Firestore
+    await docRef.delete();
+
+    res.json({ message: 'Usuário removido com sucesso' });
+
+  } catch (e) {
+    console.error('[DELETE /api/users/:id]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PATCH /api/users/:id/password — reset de senha (admin) ────
+//  Body: { password }
+app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
+  const { id }       = req.params;
+  const { password } = req.body;
+
+  if (!password || password.length < 6) {
+    return res.status(400).json({ error: 'Senha mínima: 6 caracteres' });
+  }
+
+  try {
+    const docSnap = await db.collection('guild_users').doc(id).get();
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    const { uid } = docSnap.data();
+    if (!uid) return res.status(400).json({ error: 'UID não encontrado no Firestore' });
+
+    // Atualiza senha no Firebase Auth
+    await auth.updateUser(uid, { password });
+
+    // Remove flag de primeiro acesso
+    await db.collection('guild_users').doc(id).update({ firstAccess: false });
+
+    res.json({ message: 'Senha redefinida com sucesso' });
+
+  } catch (e) {
+    console.error('[PATCH /api/users/:id/password]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PATCH /api/users/:id/guild — atualiza nome da guild (admin) ─
+//  Body: { guildName }
+app.patch('/api/users/:id/guild', requireAdmin, async (req, res) => {
+  const { id }        = req.params;
+  const { guildName } = req.body;
+
+  if (!guildName) {
+    return res.status(400).json({ error: 'guildName obrigatório' });
+  }
+
+  try {
+    await db.collection('guild_users').doc(id).update({
+      guildName: guildName.toUpperCase(),
+    });
+    res.json({ message: 'Guild atualizada' });
+  } catch (e) {
+    console.error('[PATCH /api/users/:id/guild]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PATCH /api/me/first-access — marca 1º acesso concluído ────
+//  Chamado pelo próprio usuário após definir senha no 1º login
+//  Body: { firestoreDocId }
+app.patch('/api/me/first-access', requireAuth, async (req, res) => {
+  const { firestoreDocId } = req.body;
+  if (!firestoreDocId) {
+    return res.status(400).json({ error: 'firestoreDocId obrigatório' });
+  }
+
+  try {
+    const docSnap = await db.collection('guild_users').doc(firestoreDocId).get();
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    // Garante que o doc pertence ao usuário autenticado
+    if (docSnap.data().uid !== req.decodedToken.uid) {
+      return res.status(403).json({ error: 'Operação não autorizada' });
+    }
+
+    await db.collection('guild_users').doc(firestoreDocId).update({ firstAccess: false });
+    res.json({ message: 'Primeiro acesso concluído' });
+  } catch (e) {
+    console.error('[PATCH /api/me/first-access]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Inicia servidor ────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`✅ GUILD SVE Server rodando na porta ${PORT}`);
+  console.log(`   Projeto Firebase : ${process.env.FIREBASE_PROJECT_ID}`);
+  console.log(`   Admin e-mail     : ${process.env.ADMIN_EMAIL}`);
+  console.log(`   CORS origin      : ${allowedOrigin}`);
+});
