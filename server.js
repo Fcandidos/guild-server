@@ -250,6 +250,24 @@ app.patch('/api/users/:id/guild', requireAdmin, async (req, res) => {
   }
 });
 
+// ── GET /api/me — retorna dados do usuário autenticado ────────
+app.get('/api/me', requireAuth, async (req, res) => {
+  const email = req.decodedToken.email.toLowerCase();
+  try {
+    const snap = await db.collection('guild_users')
+      .where('email', '==', email)
+      .get();
+    if (snap.empty) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    const docRef = snap.docs[0];
+    res.json({ id: docRef.id, ...docRef.data() });
+  } catch (e) {
+    console.error('[GET /api/me]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── PATCH /api/me/first-access — marca 1º acesso concluído ────
 //  Chamado pelo próprio usuário após definir senha no 1º login
 //  Body: { firestoreDocId }
