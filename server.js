@@ -250,6 +250,27 @@ app.patch('/api/users/:id/guild', requireAdmin, async (req, res) => {
   }
 });
 
+// ── PATCH /api/users/:id/permissions — atualiza permissão individual (admin) ─
+//  Body: { feature: 'pdi', value: true/false }
+app.patch('/api/users/:id/permissions', requireAdmin, async (req, res) => {
+  const { id }            = req.params;
+  const { feature, value } = req.body;
+
+  if (!feature || typeof value !== 'boolean') {
+    return res.status(400).json({ error: 'feature e value (boolean) obrigatórios' });
+  }
+
+  try {
+    await db.collection('guild_users').doc(id).update({
+      [`permissions.${feature}`]: value,
+    });
+    res.json({ message: 'Permissão atualizada' });
+  } catch (e) {
+    console.error('[PATCH /api/users/:id/permissions]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GET /api/me — retorna dados do usuário autenticado ────────
 app.get('/api/me', requireAuth, async (req, res) => {
   const email = req.decodedToken.email.toLowerCase();
