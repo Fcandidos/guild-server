@@ -472,9 +472,10 @@ app.post('/api/admin/subscription', requireAdmin, async (req, res) => {
   if (!firestoreDocId || !dias) {
     return res.status(400).json({ error: 'firestoreDocId e dias obrigatórios' });
   }
-  const d = parseInt(dias);
-  if (![30, 60, 90].includes(d)) {
-    return res.status(400).json({ error: 'Dias inválidos — use 30, 60 ou 90' });
+  const isUnlimited = dias === 'unlimited';
+  const d = isUnlimited ? 36500 : parseInt(dias); // 36500 = ~100 anos
+  if (!isUnlimited && ![30, 60, 90].includes(d)) {
+    return res.status(400).json({ error: 'Dias inválidos — use 30, 60, 90 ou unlimited' });
   }
 
   try {
@@ -483,11 +484,12 @@ app.post('/api/admin/subscription', requireAdmin, async (req, res) => {
 
     await docRef.update({
       subscriptionExpiresAt: newExpiry,
-      subscriptionPlan:      `${d}d`,
+      subscriptionPlan:      isUnlimited ? 'unlimited' : `${d}d`,
       lastPaymentAt:         new Date(),
     });
 
-    res.json({ message: `✅ +${d} dias ativados`, expiresAt: newExpiry.toISOString() });
+    const msg = isUnlimited ? '∞ Acesso ilimitado ativado' : `✅ +${d} dias ativados`;
+    res.json({ message: msg, expiresAt: newExpiry.toISOString() });
   } catch (e) {
     console.error('[ADMIN SUB]', e.message);
     res.status(500).json({ error: e.message });
