@@ -324,11 +324,12 @@ app.patch('/api/me/first-access', requireAuth, async (req, res) => {
 const MP_FEE_RATE = 0.0099; // 0.99% — taxa PIX padrão Mercado Pago
 
 const _subPlanos = {
-  '30d':  { dias: 30, net: 25.00, nome: 'RELATÓRIO DE CAÇA — 30 dias' },
-  '60d':  { dias: 60, net: 45.00, nome: 'RELATÓRIO DE CAÇA — 60 dias' },
-  '90d':  { dias: 90, net: 60.00, nome: 'RELATÓRIO DE CAÇA — 90 dias' },
-  'test':      { dias: 30, net: 1.00, nome: 'RELATÓRIO DE CAÇA — TESTE'        },
-  'test1real': { dias:  1, net: 1.00, nome: 'RELATÓRIO DE CAÇA — TESTE PIX R$1' },
+  '1h':        { horas: 1,  dias: null, net:  1.00, nome: 'RELATÓRIO DE CAÇA — Teste 1 Hora'  },
+  '30d':       { horas: null, dias: 30,  net: 25.00, nome: 'RELATÓRIO DE CAÇA — 30 dias'       },
+  '60d':       { horas: null, dias: 60,  net: 45.00, nome: 'RELATÓRIO DE CAÇA — 60 dias'       },
+  '90d':       { horas: null, dias: 90,  net: 60.00, nome: 'RELATÓRIO DE CAÇA — 90 dias'       },
+  'test':      { horas: null, dias: 30,  net:  1.00, nome: 'RELATÓRIO DE CAÇA — TESTE'         },
+  'test1real': { horas: null, dias:  1,  net:  1.00, nome: 'RELATÓRIO DE CAÇA — TESTE PIX R$1' },
 };
 
 // Calcula valor bruto que o cliente paga (inclui taxa, você recebe o net)
@@ -379,7 +380,9 @@ app.post('/api/pix/criar', requireAuth, async (req, res) => {
         transaction_amount: valor,
         description:        p.nome,
         payment_method_id:  'pix',
-        external_reference: `${uid}|${plano}|${p.dias}`,
+        external_reference: p.horas
+          ? `${uid}|${plano}|h:${p.horas}`   // horas: uid|1h|h:1
+          : `${uid}|${plano}|${p.dias}`,      // dias:  uid|30d|30
         payer: { email },
       }),
     });
@@ -442,14 +445,25 @@ app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, r
     const parts = (payment.external_reference || '').split('|');
     const uid   = parts[0];
     const plano = parts[1] || '30d';
-    const dias  = parseInt(parts[2]) || 30;
+    const ref3  = parts[2] || '30';
     if (!uid) return res.status(200).json({ ok: true });
 
     const snap = await db.collection('guild_users').where('uid', '==', uid).get();
     if (snap.empty) return res.status(200).json({ ok: true });
 
-    const docRef   = snap.docs[0].ref;
-    const newExpiry = await _extendSubscription(docRef, dias);
+    const docRef = snap.docs[0].ref;
+
+    // Calcula expiração: horas (h:N) ou dias (N)
+    let newExpiry;
+    if (ref3.startsWith('h:')) {
+      const horas = parseInt(ref3.slice(2)) || 1;
+      newExpiry = new Date(Date.now() + horas * 3600000);
+      console.log(`[WEBHOOK MP] uid=${uid} plano=${plano} +${horas}h → ${newExpiry.toISOString()}`);
+    } else {
+      const dias = parseInt(ref3) || 30;
+      newExpiry  = new Date(Date.now() + dias * 86400000);
+      console.log(`[WEBHOOK MP] uid=${uid} plano=${plano} +${dias}d → ${newExpiry.toISOString()}`);
+    }
 
     await docRef.update({
       subscriptionExpiresAt: newExpiry,
@@ -458,8 +472,6 @@ app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, r
       lastPaymentAt:         new Date(),
       lastPaymentAmount:     payment.transaction_amount,
     });
-
-    console.log(`[WEBHOOK MP] uid=${uid} plano=${plano} +${dias}d → ${newExpiry.toISOString()}`);
     res.status(200).json({ ok: true });
   } catch (e) {
     console.error('[WEBHOOK MP]', e.message);
