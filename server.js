@@ -430,6 +430,58 @@ app.get('/api/pix/status/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/pix/confirmar — libera acesso após pagamento aprovado ──
+// Chamado pelo frontend quando polling detecta status=approved
+// Usa Admin SDK (bypassa regras Firestore) para atualizar a assinatura
+app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
+  const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+  if (!MP_TOKEN) return res.status(503).json({ error: 'MP não configurado' });
+
+  const { paymentId, plano } = req.body;
+  if (!paymentId || !plano) return res.status(400).json({ error: 'paymentId e plano obrigatórios' });
+
+  try {
+    // 1. Verifica status do pagamento no Mercado Pago
+    const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      headers: { 'Authorization': `Bearer ${MP_TOKEN}` },
+    });
+    const payment = await mpRes.json();
+
+    if (payment.status !== 'approved') {
+      return res.status(402).json({ error: `Pagamento não aprovado: ${payment.status}` });
+    }
+
+    // 2. Calcula expiração baseada no plano
+    const p = _subPlanos[plano];
+    if (!p) return res.status(400).json({ error: 'Plano inválido' });
+
+    const newExpiry = p.horas
+      ? new Date(Date.now() + p.horas * 3600000)
+      : new Date(Date.now() + (p.dias || 30) * 86400000);
+
+    // 3. Atualiza Firestore com Admin SDK (sem restrições de regras)
+    const uid  = req.decodedToken.uid;
+    const snap = await db.collection('guild_users').where('uid', '==', uid).get();
+    if (snap.empty) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    await snap.docs[0].ref.update({
+      subscriptionExpiresAt: newExpiry,
+      subscriptionPlan:      plano,
+      subscriptionPending:   false,
+      lastPaymentId:         String(paymentId),
+      lastPaymentAt:         new Date(),
+      lastPaymentAmount:     payment.transaction_amount,
+    });
+
+    console.log(`[CONFIRMAR] uid=${uid} plano=${plano} expira=${newExpiry.toISOString()}`);
+    res.json({ ok: true, expiresAt: newExpiry.toISOString(), plano });
+
+  } catch (e) {
+    console.error('[CONFIRMAR]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── POST /api/webhook/mercadopago — recebe notificações MP ────
 app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, res) => {
   try {
