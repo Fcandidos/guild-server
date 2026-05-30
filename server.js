@@ -464,13 +464,26 @@ app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
     const snap = await db.collection('guild_users').where('uid', '==', uid).get();
     if (snap.empty) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-    await snap.docs[0].ref.update({
+    const userDocRef = snap.docs[0].ref;
+    const now = new Date();
+
+    await userDocRef.update({
       subscriptionExpiresAt: newExpiry,
       subscriptionPlan:      plano,
       subscriptionPending:   false,
       lastPaymentId:         String(paymentId),
-      lastPaymentAt:         new Date(),
+      lastPaymentAt:         now,
       lastPaymentAmount:     payment.transaction_amount,
+    });
+
+    // Grava entrada no histórico de pagamentos (subcoleção)
+    await userDocRef.collection('pay_history').add({
+      paymentId: String(paymentId),
+      plano,
+      amount:    payment.transaction_amount,
+      paidAt:    now,
+      expiresAt: newExpiry,
+      source:    'PIX',
     });
 
     console.log(`[CONFIRMAR] uid=${uid} plano=${plano} expira=${newExpiry.toISOString()}`);
@@ -523,14 +536,26 @@ app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, r
       console.log(`[WEBHOOK MP] uid=${uid} plano=${plano} +${dias}d → ${newExpiry.toISOString()}`);
     }
 
+    const now = new Date();
     await docRef.update({
       subscriptionExpiresAt: newExpiry,
       subscriptionPlan:      plano,
-      subscriptionPending:   false,  // limpa pendente após pagamento confirmado
+      subscriptionPending:   false,
       lastPaymentId:         String(paymentId),
-      lastPaymentAt:         new Date(),
+      lastPaymentAt:         now,
       lastPaymentAmount:     payment.transaction_amount,
     });
+
+    // Grava histórico de pagamentos
+    await docRef.collection('pay_history').add({
+      paymentId: String(paymentId),
+      plano,
+      amount:    payment.transaction_amount,
+      paidAt:    now,
+      expiresAt: newExpiry,
+      source:    'PIX-webhook',
+    });
+
     res.status(200).json({ ok: true });
   } catch (e) {
     console.error('[WEBHOOK MP]', e.message);
