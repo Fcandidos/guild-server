@@ -327,7 +327,8 @@ const _subPlanos = {
   '30d':  { dias: 30, net: 25.00, nome: 'RELATÓRIO DE CAÇA — 30 dias' },
   '60d':  { dias: 60, net: 45.00, nome: 'RELATÓRIO DE CAÇA — 60 dias' },
   '90d':  { dias: 90, net: 60.00, nome: 'RELATÓRIO DE CAÇA — 90 dias' },
-  'test': { dias: 30, net: 1.00,  nome: 'RELATÓRIO DE CAÇA — TESTE'   },
+  'test':      { dias: 30, net: 1.00, nome: 'RELATÓRIO DE CAÇA — TESTE'        },
+  'test1real': { dias:  1, net: 1.00, nome: 'RELATÓRIO DE CAÇA — TESTE PIX R$1' },
 };
 
 // Calcula valor bruto que o cliente paga (inclui taxa, você recebe o net)
