@@ -317,6 +317,183 @@ app.patch('/api/me/first-access', requireAuth, async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+//  PAGAMENTO — MERCADO PAGO PIX
+// ════════════════════════════════════════════════════════════════
+
+const MP_FEE_RATE = 0.0099; // 0.99% — taxa PIX padrão Mercado Pago
+
+const _subPlanos = {
+  '30d':  { dias: 30, net: 25.00, nome: 'EVENTO DE CAÇA — 30 dias' },
+  '60d':  { dias: 60, net: 45.00, nome: 'EVENTO DE CAÇA — 60 dias' },
+  '90d':  { dias: 90, net: 60.00, nome: 'EVENTO DE CAÇA — 90 dias' },
+  'test': { dias: 30, net: 1.00,  nome: 'EVENTO DE CAÇA — TESTE'   },
+};
+
+// Calcula valor bruto que o cliente paga (inclui taxa, você recebe o net)
+function _grossAmount(net) {
+  return Math.ceil(net / (1 - MP_FEE_RATE) * 100) / 100;
+}
+
+// Estende assinatura a partir da expiração atual (ou de hoje se já expirou)
+async function _extendSubscription(docRef, dias) {
+  const snap = await docRef.get();
+  if (!snap.exists) throw new Error('Usuário não encontrado');
+  const data  = snap.data();
+  const now   = new Date();
+  let base    = now;
+  if (data.subscriptionExpiresAt) {
+    const exp = data.subscriptionExpiresAt.toDate
+      ? data.subscriptionExpiresAt.toDate()
+      : new Date(data.subscriptionExpiresAt);
+    if (exp > now) base = exp;
+  }
+  return new Date(base.getTime() + dias * 86400000);
+}
+
+// ── POST /api/pix/criar — gera QR Code PIX ────────────────────
+app.post('/api/pix/criar', requireAuth, async (req, res) => {
+  const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+  if (!MP_TOKEN) {
+    return res.status(503).json({ error: 'Pagamento não configurado. Entre em contato pelo WhatsApp: (34) 99796-0026' });
+  }
+
+  const { plano } = req.body;
+  const p = _subPlanos[plano];
+  if (!p) return res.status(400).json({ error: 'Plano inválido' });
+
+  const uid   = req.decodedToken.uid;
+  const email = req.decodedToken.email || 'cliente@eventodecaca.com';
+  const valor = _grossAmount(p.net);
+
+  try {
+    const mpRes = await fetch('https://api.mercadopago.com/v1/payments', {
+      method:  'POST',
+      headers: {
+        'Authorization':     `Bearer ${MP_TOKEN}`,
+        'Content-Type':      'application/json',
+        'X-Idempotency-Key': `caca-${uid}-${plano}-${Date.now()}`,
+      },
+      body: JSON.stringify({
+        transaction_amount: valor,
+        description:        p.nome,
+        payment_method_id:  'pix',
+        external_reference: `${uid}|${plano}|${p.dias}`,
+        payer: { email },
+      }),
+    });
+
+    const data = await mpRes.json();
+    if (!mpRes.ok) {
+      console.error('[PIX CRIAR]', data);
+      return res.status(502).json({ error: data.message || 'Erro ao criar pagamento' });
+    }
+
+    res.json({
+      payment_id:     data.id,
+      status:         data.status,
+      qr_code:        data.point_of_interaction?.transaction_data?.qr_code,
+      qr_code_base64: data.point_of_interaction?.transaction_data?.qr_code_base64,
+      valor,
+      plano,
+      dias: p.dias,
+    });
+  } catch (e) {
+    console.error('[PIX CRIAR]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/pix/status/:id — consulta status do pagamento ────
+app.get('/api/pix/status/:id', requireAuth, async (req, res) => {
+  const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+  if (!MP_TOKEN) return res.status(503).json({ error: 'MP não configurado' });
+
+  try {
+    const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${req.params.id}`, {
+      headers: { 'Authorization': `Bearer ${MP_TOKEN}` },
+    });
+    const data = await mpRes.json();
+    res.json({ status: data.status, status_detail: data.status_detail });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/webhook/mercadopago — recebe notificações MP ────
+app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    const body = JSON.parse(req.body.toString());
+    if (body.type !== 'payment') return res.status(200).json({ ok: true });
+
+    const paymentId = body.data?.id;
+    if (!paymentId) return res.status(200).json({ ok: true });
+
+    const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+    if (!MP_TOKEN) return res.status(200).json({ ok: true });
+
+    const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      headers: { 'Authorization': `Bearer ${MP_TOKEN}` },
+    });
+    const payment = await mpRes.json();
+    if (payment.status !== 'approved') return res.status(200).json({ ok: true });
+
+    const parts = (payment.external_reference || '').split('|');
+    const uid   = parts[0];
+    const plano = parts[1] || '30d';
+    const dias  = parseInt(parts[2]) || 30;
+    if (!uid) return res.status(200).json({ ok: true });
+
+    const snap = await db.collection('guild_users').where('uid', '==', uid).get();
+    if (snap.empty) return res.status(200).json({ ok: true });
+
+    const docRef   = snap.docs[0].ref;
+    const newExpiry = await _extendSubscription(docRef, dias);
+
+    await docRef.update({
+      subscriptionExpiresAt: newExpiry,
+      subscriptionPlan:      plano,
+      lastPaymentId:         String(paymentId),
+      lastPaymentAt:         new Date(),
+      lastPaymentAmount:     payment.transaction_amount,
+    });
+
+    console.log(`[WEBHOOK MP] uid=${uid} plano=${plano} +${dias}d → ${newExpiry.toISOString()}`);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error('[WEBHOOK MP]', e.message);
+    res.status(200).json({ ok: true });
+  }
+});
+
+// ── POST /api/admin/subscription — ativa assinatura manual ────
+app.post('/api/admin/subscription', requireAdmin, async (req, res) => {
+  const { firestoreDocId, dias } = req.body;
+  if (!firestoreDocId || !dias) {
+    return res.status(400).json({ error: 'firestoreDocId e dias obrigatórios' });
+  }
+  const d = parseInt(dias);
+  if (![30, 60, 90].includes(d)) {
+    return res.status(400).json({ error: 'Dias inválidos — use 30, 60 ou 90' });
+  }
+
+  try {
+    const docRef   = db.collection('guild_users').doc(firestoreDocId);
+    const newExpiry = await _extendSubscription(docRef, d);
+
+    await docRef.update({
+      subscriptionExpiresAt: newExpiry,
+      subscriptionPlan:      `${d}d`,
+      lastPaymentAt:         new Date(),
+    });
+
+    res.json({ message: `✅ +${d} dias ativados`, expiresAt: newExpiry.toISOString() });
+  } catch (e) {
+    console.error('[ADMIN SUB]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Inicia servidor ────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`✅ GUILD SVE Server rodando na porta ${PORT}`);
