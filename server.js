@@ -97,7 +97,13 @@ async function requireAuth(req, res, next) {
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', project: process.env.FIREBASE_PROJECT_ID });
+  res.json({
+    status:   'ok',
+    project:  process.env.FIREBASE_PROJECT_ID,
+    version:  '2.0-pix',
+    mp_token: process.env.MP_ACCESS_TOKEN ? 'configurado' : 'AUSENTE',
+    routes:   ['/api/pix/criar', '/api/pix/status/:id', '/api/webhook/mercadopago', '/api/admin/subscription'],
+  });
 });
 
 // ── GET /api/users — lista usuários (admin) ───────────────────
