@@ -468,6 +468,7 @@ app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, r
     await docRef.update({
       subscriptionExpiresAt: newExpiry,
       subscriptionPlan:      plano,
+      subscriptionPending:   false,  // limpa pendente após pagamento confirmado
       lastPaymentId:         String(paymentId),
       lastPaymentAt:         new Date(),
       lastPaymentAmount:     payment.transaction_amount,
