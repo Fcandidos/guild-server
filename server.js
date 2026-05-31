@@ -40,10 +40,14 @@ const PORT = process.env.PORT || 3001;
 
 app.use(express.json());
 
-// CORS — só aceita requisições do seu site
-const allowedOrigin = process.env.ALLOWED_ORIGIN || '*';
+// CORS — aceita uma ou mais origens separadas por vírgula
+const _rawOrigins = process.env.ALLOWED_ORIGIN || '*';
+const _allowedOrigins = _rawOrigins === '*' ? '*' : _rawOrigins.split(',').map(o => o.trim());
 app.use(cors({
-  origin: allowedOrigin,
+  origin: _allowedOrigins === '*' ? '*' : (origin, cb) => {
+    if (!origin || _allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error('CORS: origem não permitida — ' + origin));
+  },
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
