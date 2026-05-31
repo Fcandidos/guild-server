@@ -602,5 +602,5 @@ app.listen(PORT, () => {
   console.log(`✅ GUILD SVE Server rodando na porta ${PORT}`);
   console.log(`   Projeto Firebase : ${process.env.FIREBASE_PROJECT_ID}`);
   console.log(`   Admin e-mail     : ${process.env.ADMIN_EMAIL}`);
-  console.log(`   CORS origin      : ${allowedOrigin}`);
+  console.log(`   CORS origin      : ${_rawOrigins}`);
 });
