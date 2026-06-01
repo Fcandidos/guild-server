@@ -16,6 +16,8 @@
 require('dotenv').config();
 const express    = require('express');
 const cors       = require('cors');
+const helmet     = require('helmet');
+const rateLimit  = require('express-rate-limit');
 const admin      = require('firebase-admin');
 
 // ── Inicializa Firebase Admin ──────────────────────────────────
@@ -38,14 +40,47 @@ const db   = admin.firestore();
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
+// ── Segurança: headers HTTP ────────────────────────────────────
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+
+// ── Rate limiting global — protege contra bots e abuso ────────
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000,      // janela de 1 minuto
+  max: 60,                  // máx 60 requisições por IP por minuto
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas requisições — aguarde 1 minuto.' },
+});
+app.use(globalLimiter);
+
+// ── Rate limiting específico para PIX (evita spam de pagamentos) ─
+const pixLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // janela de 10 minutos
+  max: 5,                   // máx 5 criações de PIX por IP por 10 min
+  message: { error: 'Limite de tentativas de pagamento atingido — aguarde 10 minutos.' },
+});
+
+// ── Rate limiting para auth-heavy routes ──────────────────────
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Muitas requisições autenticadas — aguarde 1 minuto.' },
+});
+
 app.use(express.json());
 
 // CORS — aceita uma ou mais origens separadas por vírgula
-const _rawOrigins = process.env.ALLOWED_ORIGIN || '*';
-const _allowedOrigins = _rawOrigins === '*' ? '*' : _rawOrigins.split(',').map(o => o.trim());
+const _rawOrigins = process.env.ALLOWED_ORIGIN;
+if (!_rawOrigins) {
+  console.error('⛔ ALLOWED_ORIGIN não configurado — servidor abortando por segurança.');
+  process.exit(1);
+}
+const _allowedOrigins = _rawOrigins.split(',').map(o => o.trim());
 app.use(cors({
-  origin: _allowedOrigins === '*' ? '*' : (origin, cb) => {
-    if (!origin || _allowedOrigins.includes(origin)) return cb(null, true);
+  origin: (origin, cb) => {
+    // Sem origin = chamada server-to-server (ex: webhook MP) — permitida
+    if (!origin) return cb(null, true);
+    if (_allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error('CORS: origem não permitida — ' + origin));
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
@@ -282,7 +317,7 @@ app.patch('/api/users/:id/permissions', requireAdmin, async (req, res) => {
 });
 
 // ── GET /api/me — retorna dados do usuário autenticado ────────
-app.get('/api/me', requireAuth, async (req, res) => {
+app.get('/api/me', authLimiter, requireAuth, async (req, res) => {
   const email = req.decodedToken.email.toLowerCase();
   try {
     const snap = await db.collection('guild_users')
@@ -364,7 +399,7 @@ async function _extendSubscription(docRef, dias) {
 }
 
 // ── POST /api/pix/criar — gera QR Code PIX ────────────────────
-app.post('/api/pix/criar', requireAuth, async (req, res) => {
+app.post('/api/pix/criar', pixLimiter, requireAuth, async (req, res) => {
   const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
   if (!MP_TOKEN) {
     return res.status(503).json({ error: 'Pagamento não configurado. Entre em contato pelo WhatsApp: (34) 99796-0026' });
@@ -437,12 +472,15 @@ app.get('/api/pix/status/:id', requireAuth, async (req, res) => {
 // ── POST /api/pix/confirmar — libera acesso após pagamento aprovado ──
 // Chamado pelo frontend quando polling detecta status=approved
 // Usa Admin SDK (bypassa regras Firestore) para atualizar a assinatura
-app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
+app.post('/api/pix/confirmar', pixLimiter, requireAuth, async (req, res) => {
   const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
   if (!MP_TOKEN) return res.status(503).json({ error: 'MP não configurado' });
 
   const { paymentId, plano } = req.body;
   if (!paymentId || !plano) return res.status(400).json({ error: 'paymentId e plano obrigatórios' });
+
+  // uid declarado fora do try — necessário para validação de propriedade antes de qualquer await
+  const uid = req.decodedToken.uid;
 
   try {
     // 1. Verifica status do pagamento no Mercado Pago
@@ -455,7 +493,18 @@ app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
       return res.status(402).json({ error: `Pagamento não aprovado: ${payment.status}` });
     }
 
-    // 2. Calcula expiração baseada no plano
+    // 2. Valida que o plano e uid batem com o external_reference gravado no MP
+    //    Impede atacante de pagar R$1 e reivindicar plano de 90 dias
+    const extParts   = (payment.external_reference || '').split('|');
+    const extUid     = extParts[0];
+    const extPlano   = extParts[1];
+    if (extUid !== uid) {
+      return res.status(403).json({ error: 'Pagamento não pertence a este usuário' });
+    }
+    if (extPlano && extPlano !== plano) {
+      return res.status(403).json({ error: 'Plano não corresponde ao pagamento realizado' });
+    }
+
     const p = _subPlanos[plano];
     if (!p) return res.status(400).json({ error: 'Plano inválido' });
 
@@ -464,7 +513,6 @@ app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
       : new Date(Date.now() + (p.dias || 30) * 86400000);
 
     // 3. Atualiza Firestore com Admin SDK (sem restrições de regras)
-    const uid  = req.decodedToken.uid;
     const snap = await db.collection('guild_users').where('uid', '==', uid).get();
     if (snap.empty) return res.status(404).json({ error: 'Usuário não encontrado' });
 
@@ -501,6 +549,26 @@ app.post('/api/pix/confirmar', requireAuth, async (req, res) => {
 
 // ── POST /api/webhook/mercadopago — recebe notificações MP ────
 app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, res) => {
+  // Valida assinatura HMAC do MercadoPago (obrigatório — rejeita se MP_WEBHOOK_SECRET não configurado)
+  const MP_SECRET = process.env.MP_WEBHOOK_SECRET;
+  if (!MP_SECRET) {
+    console.error('[WEBHOOK MP] MP_WEBHOOK_SECRET não configurado — rejeitando requisição por segurança');
+    return res.status(500).json({ error: 'Webhook não configurado' });
+  }
+  const crypto     = require('crypto');
+  const xSignature = req.headers['x-signature'] || '';
+  const xRequestId = req.headers['x-request-id'] || '';
+  const urlParams  = new URLSearchParams(req.originalUrl.split('?')[1] || '');
+  const dataId     = urlParams.get('data.id') || '';
+  const ts         = (xSignature.match(/ts=(\d+)/) || [])[1] || '';
+  const manifest   = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
+  const sigPart    = (xSignature.match(/v1=([^,]+)/) || [])[1] || '';
+  const expected   = crypto.createHmac('sha256', MP_SECRET).update(manifest).digest('hex');
+  if (!sigPart || expected !== sigPart) {
+    console.warn('[WEBHOOK MP] Assinatura inválida — possível requisição forjada');
+    return res.status(401).json({ error: 'Assinatura inválida' });
+  }
+
   try {
     const body = JSON.parse(req.body.toString());
     if (body.type !== 'payment') return res.status(200).json({ ok: true });
