@@ -517,6 +517,13 @@ app.post('/api/pix/confirmar', pixLimiter, requireAuth, async (req, res) => {
     if (snap.empty) return res.status(404).json({ error: 'Usuário não encontrado' });
 
     const userDocRef = snap.docs[0].ref;
+    const userDoc    = snap.docs[0].data();
+
+    // Proteção contra double-spend: rejeita se paymentId já foi processado
+    if (userDoc.lastPaymentId && String(userDoc.lastPaymentId) === String(paymentId)) {
+      return res.status(409).json({ error: 'Pagamento já processado anteriormente' });
+    }
+
     const now = new Date();
 
     await userDocRef.update({
