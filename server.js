@@ -36,9 +36,16 @@ admin.initializeApp({
 const auth = admin.auth();
 const db   = admin.firestore();
 
+// ── Tratamento de erros não capturados ────────────────────────
+process.on('uncaughtException',  err => console.error('[UNCAUGHT]',  err));
+process.on('unhandledRejection', err => console.error('[UNHANDLED]', err));
+
 // ── Express ────────────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 3001;
+
+// Confia no proxy do Render para IP real (necessário para rate limit por IP)
+app.set('trust proxy', 1);
 
 // ── Segurança: headers HTTP ────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
@@ -67,7 +74,7 @@ const authLimiter = rateLimit({
   message: { error: 'Muitas requisições autenticadas — aguarde 1 minuto.' },
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10kb' }));
 
 // CORS — aceita uma ou mais origens separadas por vírgula
 const _rawOrigins = process.env.ALLOWED_ORIGIN;
@@ -136,13 +143,7 @@ async function requireAuth(req, res, next) {
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({
-    status:   'ok',
-    project:  process.env.FIREBASE_PROJECT_ID,
-    version:  '2.0-pix',
-    mp_token: process.env.MP_ACCESS_TOKEN ? 'configurado' : 'AUSENTE',
-    routes:   ['/api/pix/criar', '/api/pix/status/:id', '/api/webhook/mercadopago', '/api/admin/subscription'],
-  });
+  res.json({ status: 'ok' });
 });
 
 // ── GET /api/users — lista usuários (admin) ───────────────────
@@ -463,6 +464,14 @@ app.get('/api/pix/status/:id', requireAuth, async (req, res) => {
       headers: { 'Authorization': `Bearer ${MP_TOKEN}` },
     });
     const data = await mpRes.json();
+
+    // Verifica se o pagamento pertence ao usuário autenticado
+    const extParts = (data.external_reference || '').split('|');
+    const payUid   = extParts[0];
+    if (payUid && payUid !== req.decodedToken.uid) {
+      return res.status(403).json({ error: 'Acesso negado — pagamento não pertence a este usuário' });
+    }
+
     res.json({ status: data.status, status_detail: data.status_detail });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -601,7 +610,14 @@ app.post('/api/webhook/mercadopago', express.raw({ type: '*/*' }), async (req, r
     const snap = await db.collection('guild_users').where('uid', '==', uid).get();
     if (snap.empty) return res.status(200).json({ ok: true });
 
-    const docRef = snap.docs[0].ref;
+    const docRef  = snap.docs[0].ref;
+    const docData = snap.docs[0].data();
+
+    // Anti-replay: ignora se paymentId já foi processado
+    if (docData.lastPaymentId && String(docData.lastPaymentId) === String(paymentId)) {
+      console.log(`[WEBHOOK MP] paymentId ${paymentId} já processado — ignorado`);
+      return res.status(200).json({ ok: true });
+    }
 
     // Calcula expiração: horas (h:N) ou dias (N)
     let newExpiry;
