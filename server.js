@@ -688,6 +688,49 @@ app.post('/api/admin/subscription', requireAdmin, async (req, res) => {
   }
 });
 
+// ── POST /api/admin/notify-improvements — envia push para todos ─
+app.post('/api/admin/notify-improvements', requireAdmin, async (req, res) => {
+  const { title, body } = req.body;
+  if (!title) return res.status(400).json({ error: 'title obrigatório' });
+
+  try {
+    // Busca todos os tokens FCM cadastrados
+    const snap   = await db.collection('fcm_tokens').get();
+    const tokens = snap.docs.map(d => d.data().token).filter(Boolean);
+
+    if (!tokens.length) return res.json({ ok: true, sent: 0, message: 'Nenhum dispositivo registrado' });
+
+    // Envia para todos de uma vez (multicast)
+    const result = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: { title, body },
+      webpush: {
+        notification: {
+          icon:    'https://caca-d5478.web.app/char_knight2.png',
+          badge:   'https://caca-d5478.web.app/char_knight2.png',
+          vibrate: [200, 100, 200],
+          requireInteraction: true,
+        },
+        fcmOptions: { link: 'https://caca-d5478.web.app' },
+      },
+    });
+
+    // Remove tokens inválidos do Firestore
+    result.responses.forEach((r, i) => {
+      if (!r.success) {
+        const docId = snap.docs[i]?.id;
+        if (docId) db.collection('fcm_tokens').doc(docId).delete().catch(() => {});
+      }
+    });
+
+    console.log(`[NOTIFY] Enviado: ${result.successCount} | Falha: ${result.failureCount}`);
+    res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
+  } catch(e) {
+    console.error('[NOTIFY]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Inicia servidor ────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`✅ GUILD SVE Server rodando na porta ${PORT}`);
