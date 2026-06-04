@@ -479,12 +479,15 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
 });
 
 // ── PATCH /api/users/:id/password — reset de senha (admin) ────
-//  Body: { password }
+//  Body: { password? }  — se omitido, gera senha temporária e envia email
 app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
-  const { id }       = req.params;
-  const { password } = req.body;
+  const { id } = req.params;
+  let { password } = req.body;
 
-  if (!password || password.length < 6) {
+  const autoPass = !password || password.trim() === '';
+  if (autoPass) password = _generatePassword();
+
+  if (password.length < 6) {
     return res.status(400).json({ error: 'Senha mínima: 6 caracteres' });
   }
 
@@ -494,16 +497,31 @@ app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
-    const { uid } = docSnap.data();
+    const data = docSnap.data();
+    const { uid, email, name, guildName } = data;
     if (!uid) return res.status(400).json({ error: 'UID não encontrado no Firestore' });
 
     // Atualiza senha no Firebase Auth
     await auth.updateUser(uid, { password });
 
-    // Remove flag de primeiro acesso
-    await db.collection('guild_users').doc(id).update({ firstAccess: false });
+    // Marca firstAccess para forçar troca de senha no próximo login
+    await db.collection('guild_users').doc(id).update({ firstAccess: true });
 
-    res.json({ message: 'Senha redefinida com sucesso' });
+    // Se foi gerada automaticamente, envia email com a senha temporária
+    if (autoPass && email) {
+      try {
+        await sendWelcomeEmail({
+          to:        email,
+          userName:  name      || 'Membro',
+          guildName: guildName || 'Guild',
+          password,
+        });
+      } catch (mailErr) {
+        console.warn('[PATCH password] Email falhou:', mailErr.message);
+      }
+    }
+
+    res.json({ message: 'Senha redefinida com sucesso', emailSent: autoPass });
 
   } catch (e) {
     console.error('[PATCH /api/users/:id/password]', e);
