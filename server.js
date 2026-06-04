@@ -21,13 +21,19 @@ const rateLimit  = require('express-rate-limit');
 const admin      = require('firebase-admin');
 const nodemailer = require('nodemailer');
 
-// ── Nodemailer — Gmail ─────────────────────────────────────────
+// ── Nodemailer — Gmail (porta 587 TLS — compatível com Render) ──
 const _mailer = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  requireTLS: true,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASS,
   },
+  connectionTimeout: 10000,
+  greetingTimeout:   10000,
+  socketTimeout:     15000,
 });
 
 async function sendWelcomeEmail({ to, userName, guildName, password }) {
