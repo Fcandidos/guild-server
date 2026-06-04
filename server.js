@@ -234,6 +234,19 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
     // 2. Remove do Firestore (guild_users)
     await docRef.delete();
 
+    // 2b. Remove todos os docs de presença com o mesmo email (limpa UIDs antigos)
+    const { email } = docSnap.data();
+    if (email) {
+      try {
+        const presSnap = await db.collection('presence').get();
+        const batch = db.batch();
+        presSnap.docs.forEach(d => {
+          if (d.data().email === email) batch.delete(d.ref);
+        });
+        await batch.commit();
+      } catch(e) { console.warn('[DELETE] Erro ao limpar presença:', e.message); }
+    }
+
     // 3. Limpa dados da guild (shared_reports + guild_history) se guildName existir
     if (guildName) {
       const guildId = guildName.toUpperCase()
