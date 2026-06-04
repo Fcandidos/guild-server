@@ -507,21 +507,18 @@ app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
     // Marca firstAccess para forçar troca de senha no próximo login
     await db.collection('guild_users').doc(id).update({ firstAccess: true });
 
-    // Se foi gerada automaticamente, envia email com a senha temporária
-    if (autoPass && email) {
-      try {
-        await sendWelcomeEmail({
-          to:        email,
-          userName:  name      || 'Membro',
-          guildName: guildName || 'Guild',
-          password,
-        });
-      } catch (mailErr) {
-        console.warn('[PATCH password] Email falhou:', mailErr.message);
-      }
-    }
-
+    // Responde imediatamente — não bloqueia esperando o email
     res.json({ message: 'Senha redefinida com sucesso', emailSent: autoPass });
+
+    // Envia email em background (não bloqueia a resposta)
+    if (autoPass && email) {
+      sendWelcomeEmail({
+        to:        email,
+        userName:  name      || 'Membro',
+        guildName: guildName || 'Guild',
+        password,
+      }).catch(e => console.warn('[PATCH password] Email falhou:', e.message));
+    }
 
   } catch (e) {
     console.error('[PATCH /api/users/:id/password]', e);
