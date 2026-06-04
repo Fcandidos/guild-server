@@ -498,8 +498,19 @@ app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
     }
 
     const data = docSnap.data();
-    const { uid, email, name, guildName } = data;
+    let { uid, email, name, guildName } = data;
     if (!uid) return res.status(400).json({ error: 'UID não encontrado no Firestore' });
+
+    // Fallback: busca email direto do Firebase Auth se não estiver no Firestore
+    if (!email) {
+      try {
+        const authUser = await auth.getUser(uid);
+        email = authUser.email;
+        console.log('[PATCH password] Email obtido do Firebase Auth:', email);
+      } catch(e) {
+        console.warn('[PATCH password] Não foi possível obter email do Auth:', e.message);
+      }
+    }
 
     // Atualiza senha no Firebase Auth
     await auth.updateUser(uid, { password });
@@ -508,16 +519,19 @@ app.patch('/api/users/:id/password', requireAdmin, async (req, res) => {
     await db.collection('guild_users').doc(id).update({ firstAccess: true });
 
     // Responde imediatamente — não bloqueia esperando o email
-    res.json({ message: 'Senha redefinida com sucesso', emailSent: autoPass });
+    res.json({ message: 'Senha redefinida com sucesso', emailSent: autoPass && !!email });
 
     // Envia email em background (não bloqueia a resposta)
     if (autoPass && email) {
+      console.log('[PATCH password] Enviando email para:', email);
       sendWelcomeEmail({
         to:        email,
         userName:  name      || 'Membro',
         guildName: guildName || 'Guild',
         password,
-      }).catch(e => console.warn('[PATCH password] Email falhou:', e.message));
+      }).catch(e => console.error('[PATCH password] Email falhou:', e.message));
+    } else if (autoPass) {
+      console.warn('[PATCH password] Email não encontrado para uid:', uid);
     }
 
   } catch (e) {
