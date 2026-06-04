@@ -310,7 +310,7 @@ async function requireAuth(req, res, next) {
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', version: '2026-06-04-v2' });
 });
 
 // ── GET /api/users — lista usuários (admin) ───────────────────
