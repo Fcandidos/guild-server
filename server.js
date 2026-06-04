@@ -19,6 +19,173 @@ const cors       = require('cors');
 const helmet     = require('helmet');
 const rateLimit  = require('express-rate-limit');
 const admin      = require('firebase-admin');
+const nodemailer = require('nodemailer');
+
+// ── Nodemailer — Gmail ─────────────────────────────────────────
+const _mailer = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASS,
+  },
+});
+
+async function sendWelcomeEmail({ to, userName, guildName, password }) {
+  const siteUrl = process.env.SITE_URL || 'https://caca-d5478.web.app';
+  const html = `
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background:#f0f2f8; color:#1a1a2e; }
+  .wrap { max-width:560px; margin:32px auto; }
+  .header {
+    background:linear-gradient(135deg,#0a0f2e 0%,#101840 100%);
+    border-radius:16px 16px 0 0;
+    padding:32px 36px 24px;
+    text-align:center;
+    border-bottom:3px solid #FFD700;
+  }
+  .header-title {
+    font-size:22px; font-weight:900; letter-spacing:3px;
+    color:#FFD700; margin-bottom:6px;
+  }
+  .header-sub { font-size:12px; color:rgba(0,229,255,0.7); letter-spacing:2px; }
+  .body {
+    background:#fff;
+    padding:32px 36px;
+    border-left:1px solid #e0e4f0;
+    border-right:1px solid #e0e4f0;
+  }
+  .greeting { font-size:18px; font-weight:700; color:#0a0f2e; margin-bottom:8px; }
+  .intro { font-size:14px; color:#555; line-height:1.7; margin-bottom:24px; }
+  .info-box {
+    background:#f8f9fc;
+    border:1px solid #e0e4f0;
+    border-left:4px solid #0066cc;
+    border-radius:8px;
+    padding:18px 20px;
+    margin-bottom:24px;
+  }
+  .info-row { display:flex; gap:10px; align-items:center; margin-bottom:10px; }
+  .info-row:last-child { margin-bottom:0; }
+  .info-label { font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:1px; width:80px; flex-shrink:0; }
+  .info-value { font-size:14px; font-weight:700; color:#1a1a2e; }
+  .pass-box {
+    background:#fff8e0;
+    border:1px solid #ffe4a0;
+    border-left:4px solid #FFB800;
+    border-radius:8px;
+    padding:18px 20px;
+    margin-bottom:24px;
+    text-align:center;
+  }
+  .pass-label { font-size:11px; color:#888; letter-spacing:2px; text-transform:uppercase; margin-bottom:8px; }
+  .pass-value { font-size:28px; font-weight:900; letter-spacing:6px; color:#cc8800; font-family:monospace; }
+  .pass-warn { font-size:11px; color:#888; margin-top:8px; }
+  .steps { margin-bottom:24px; }
+  .steps-title { font-size:13px; font-weight:700; color:#0a0f2e; margin-bottom:12px; letter-spacing:1px; text-transform:uppercase; }
+  .step { display:flex; gap:12px; align-items:flex-start; margin-bottom:10px; }
+  .step-num {
+    width:24px; height:24px; border-radius:50%; flex-shrink:0;
+    background:#0066cc; color:#fff;
+    font-size:12px; font-weight:700;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .step-text { font-size:13px; color:#444; line-height:1.6; padding-top:3px; }
+  .step-text a { color:#0066cc; font-weight:700; }
+  .btn-wrap { text-align:center; margin-bottom:24px; }
+  .btn {
+    display:inline-block;
+    background:linear-gradient(135deg,#0066cc,#0044aa);
+    color:#fff; text-decoration:none;
+    padding:14px 36px; border-radius:10px;
+    font-size:14px; font-weight:700; letter-spacing:2px;
+    text-transform:uppercase;
+  }
+  .footer {
+    background:#0a0f2e;
+    border-radius:0 0 16px 16px;
+    padding:20px 36px;
+    text-align:center;
+  }
+  .footer-text { font-size:11px; color:rgba(200,230,255,0.45); line-height:1.7; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="header-title">⚔ RELATÓRIO DE CAÇA</div>
+    <div class="header-sub">Plataforma de Gestão para Guilds · Lords Mobile</div>
+  </div>
+  <div class="body">
+    <div class="greeting">Olá, ${userName}! 👋</div>
+    <div class="intro">
+      Você foi cadastrado no <strong>Relatório de Caça</strong> — plataforma de gestão da guild
+      <strong>${guildName}</strong>. Abaixo estão suas credenciais de acesso.
+    </div>
+
+    <div class="info-box">
+      <div class="info-row">
+        <div class="info-label">Guild</div>
+        <div class="info-value">⚔ ${guildName}</div>
+      </div>
+      <div class="info-row">
+        <div class="info-label">E-mail</div>
+        <div class="info-value">${to}</div>
+      </div>
+    </div>
+
+    <div class="pass-box">
+      <div class="pass-label">🔑 Senha temporária</div>
+      <div class="pass-value">${password}</div>
+      <div class="pass-warn">Você será solicitado a criar uma nova senha no primeiro acesso.</div>
+    </div>
+
+    <div class="steps">
+      <div class="steps-title">📋 Como acessar</div>
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">Acesse <a href="${siteUrl}">${siteUrl}</a> no seu navegador.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">Clique em <strong>"Já tem uma conta? Clique para entrar"</strong>.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">Digite seu e-mail e a <strong>senha temporária</strong> acima.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">Crie sua <strong>nova senha pessoal</strong> quando solicitado.</div>
+      </div>
+    </div>
+
+    <div class="btn-wrap">
+      <a href="${siteUrl}" class="btn">ACESSAR O SISTEMA</a>
+    </div>
+  </div>
+  <div class="footer">
+    <div class="footer-text">
+      Este e-mail foi enviado automaticamente pelo sistema Relatório de Caça.<br>
+      Em caso de dúvidas, entre em contato com o líder da sua guild.
+    </div>
+  </div>
+</div>
+</body>
+</html>`;
+
+  await _mailer.sendMail({
+    from: `"Suporte Relatório de Caça" <${process.env.GMAIL_USER}>`,
+    to,
+    subject: `⚔ Seu acesso ao Relatório de Caça — ${guildName}`,
+    html,
+  });
+}
 
 // ── Inicializa Firebase Admin ──────────────────────────────────
 const serviceAccount = {
@@ -158,13 +325,26 @@ app.get('/api/users', requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /api/users — cria usuário (admin) ────────────────────
-//  Body: { name, email, password, guildName }
-app.post('/api/users', requireAdmin, async (req, res) => {
-  const { name, email, password, guildName } = req.body;
+// Gera senha aleatória segura de 10 caracteres
+function _generatePassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#';
+  let pass = '';
+  for (let i = 0; i < 10; i++) pass += chars[Math.floor(Math.random() * chars.length)];
+  return pass;
+}
 
-  if (!name || !email || !password || !guildName) {
-    return res.status(400).json({ error: 'Campos obrigatórios: name, email, password, guildName' });
+// ── POST /api/users — cria usuário (admin) ────────────────────
+//  Body: { name, email, password (opcional), guildName }
+app.post('/api/users', requireAdmin, async (req, res) => {
+  const { name, email, guildName } = req.body;
+  let { password } = req.body;
+
+  // Se senha não informada, gera automaticamente
+  const autoPass = !password || password.trim() === '';
+  if (autoPass) password = _generatePassword();
+
+  if (!name || !email || !guildName) {
+    return res.status(400).json({ error: 'Campos obrigatórios: name, email, guildName' });
   }
   if (password.length < 6) {
     return res.status(400).json({ error: 'Senha mínima: 6 caracteres' });
@@ -193,10 +373,25 @@ app.post('/api/users', requireAdmin, async (req, res) => {
       firstAccess: true,
     });
 
+    // 3. Envia email de boas-vindas com senha (se gerada automaticamente ou sempre)
+    try {
+      await sendWelcomeEmail({
+        to:        email.toLowerCase(),
+        userName:  name,
+        guildName: guildName.toUpperCase(),
+        password,
+      });
+      console.log(`[EMAIL] Boas-vindas enviado para ${email}`);
+    } catch (mailErr) {
+      console.warn('[EMAIL] Falha ao enviar boas-vindas:', mailErr.message);
+      // Não falha o cadastro se o email não for enviado
+    }
+
     res.status(201).json({
-      message: 'Usuário criado com sucesso',
-      id:      docRef.id,
-      uid:     userRecord.uid,
+      message:   'Usuário criado com sucesso',
+      id:        docRef.id,
+      uid:       userRecord.uid,
+      emailSent: true,
     });
 
   } catch (e) {
