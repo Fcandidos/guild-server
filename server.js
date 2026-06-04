@@ -223,7 +223,7 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Usuário não encontrado no Firestore' });
     }
 
-    const { uid } = docSnap.data();
+    const { uid, guildName } = docSnap.data();
 
     // 1. Remove do Firebase Auth
     if (uid) {
@@ -231,10 +231,39 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
       catch (e) { console.warn('[DELETE] Auth user not found, continuing:', e.message); }
     }
 
-    // 2. Remove do Firestore
+    // 2. Remove do Firestore (guild_users)
     await docRef.delete();
 
-    res.json({ message: 'Usuário removido com sucesso' });
+    // 3. Limpa dados da guild (shared_reports + guild_history) se guildName existir
+    if (guildName) {
+      const guildId = guildName.toUpperCase()
+        .replace(/\s+/g, '_')
+        .replace(/[^A-Z0-9_\-]/g, c => '_' + c.charCodeAt(0) + '_') || 'DEFAULT';
+      const guildIdLegacy = guildName.toUpperCase()
+        .replace(/\s+/g, '_')
+        .replace(/[^A-Z0-9_\-]/g, '') || 'DEFAULT';
+
+      // Deleta shared_reports (novo ID e legado)
+      for (const gid of [...new Set([guildId, guildIdLegacy])]) {
+        try { await db.collection('shared_reports').doc(gid).delete(); }
+        catch (_) {}
+      }
+
+      // Deleta entradas do guild_history
+      for (const gid of [...new Set([guildId, guildIdLegacy])]) {
+        try {
+          const entries = await db.collection('guild_history').doc(gid).collection('entries').get();
+          const batch = db.batch();
+          entries.docs.forEach(d => batch.delete(d.ref));
+          if (entries.docs.length) await batch.commit();
+          await db.collection('guild_history').doc(gid).delete();
+        } catch (_) {}
+      }
+
+      console.log(`[DELETE] Dados da guild "${guildName}" (${guildId}) removidos`);
+    }
+
+    res.json({ message: 'Usuário e dados da guild removidos com sucesso' });
 
   } catch (e) {
     console.error('[DELETE /api/users/:id]', e);
