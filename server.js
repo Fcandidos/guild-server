@@ -373,25 +373,24 @@ app.post('/api/users', requireAdmin, async (req, res) => {
       firstAccess: true,
     });
 
-    // 3. Envia email de boas-vindas com senha (se gerada automaticamente ou sempre)
-    try {
-      await sendWelcomeEmail({
-        to:        email.toLowerCase(),
-        userName:  name,
-        guildName: guildName.toUpperCase(),
-        password,
-      });
-      console.log(`[EMAIL] Boas-vindas enviado para ${email}`);
-    } catch (mailErr) {
-      console.warn('[EMAIL] Falha ao enviar boas-vindas:', mailErr.message);
-      // Não falha o cadastro se o email não for enviado
-    }
-
+    // 3. Responde imediatamente e envia email em background (evita timeout)
     res.status(201).json({
       message:   'Usuário criado com sucesso',
       id:        docRef.id,
       uid:       userRecord.uid,
       emailSent: true,
+    });
+
+    // Email em background — não bloqueia a resposta
+    sendWelcomeEmail({
+      to:        email.toLowerCase(),
+      userName:  name,
+      guildName: guildName.toUpperCase(),
+      password,
+    }).then(() => {
+      console.log(`[EMAIL] Boas-vindas enviado para ${email}`);
+    }).catch(mailErr => {
+      console.warn('[EMAIL] Falha ao enviar boas-vindas:', mailErr.message);
     });
 
   } catch (e) {
