@@ -310,7 +310,18 @@ async function requireAuth(req, res, next) {
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2026-06-04-v2' });
+  res.json({ status: 'ok', version: '2026-06-04-v3' });
+});
+
+// ── GET /test-email — testa envio de email (temporário, sem auth) ─
+app.get('/test-email', async (req, res) => {
+  const to = req.query.to || process.env.GMAIL_USER;
+  try {
+    await sendWelcomeEmail({ to, userName: 'Teste', guildName: 'GUILD TESTE', password: 'SENHA123' });
+    res.json({ ok: true, sentTo: to, from: process.env.GMAIL_USER });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message, from: process.env.GMAIL_USER });
+  }
 });
 
 // ── GET /api/users — lista usuários (admin) ───────────────────
