@@ -1158,32 +1158,85 @@ app.post('/api/telegram/set-interval', requireAdmin, (req, res) => {
   res.json({ ok: true, intervalMinutes: mins });
 });
 
+// Converte JSON do xlsx para formato allData (igual ao parseRows do front-end)
+function xlsxJsonToAllData(jsonData) {
+  const sheetName = Object.keys(jsonData)[0];
+  const rows      = jsonData[sheetName] || [];
+  const n = (v) => parseFloat(v) || 0;
+  const allData = [];
+  for (const r of rows) {
+    if (!r['Name'] || r['Name'] === 'Total') continue;
+    const l1h = n(r['L1 (Hunt)']); const l2h = n(r['L2 (Hunt)']); const l3h = n(r['L3 (Hunt)']);
+    const l4h = n(r['L4 (Hunt)']); const l5h = n(r['L5 (Hunt)']);
+    const l1p = n(r['L1 (Purchase)']); const l2p = n(r['L2 (Purchase)']); const l3p = n(r['L3 (Purchase)']);
+    const l4p = n(r['L4 (Purchase)']); const l5p = n(r['L5 (Purchase)']);
+    const pts = l2h*1 + l3h*3 + l4h*6 + l5h*12 + l2p*1 + l3p*3 + l4p*6 + l5p*12;
+    allData.push({
+      userId: String(r['User ID'] || ''), name: r['Name'],
+      totalKills: n(r['Total']), l1h, l2h, l3h, l4h, l5h, l1p, l2p, l3p, l4p, l5p, pts
+    });
+  }
+  allData.sort((a, b) => b.pts - a.pts);
+  allData.forEach((d, i) => d.rank = i + 1);
+  return allData;
+}
+
 async function tgAutoUpdate() {
   if (_tgAutoRunning) return;
   _tgAutoRunning = true;
   console.log('[TG AUTO] Iniciando atualização automática...');
   try {
-    // Busca todos os usuários com tgGroupId configurado
-    const snap = await db.collection('guild_users')
-      .where('tgGroupId', '!=', null)
-      .get();
+    // Busca admin config (tgGroupId do admin em ADMIN_CONFIG)
+    const adminConfig = await db.collection('shared_reports').doc('ADMIN_CONFIG').get();
+    const admData = adminConfig.exists ? adminConfig.data() : {};
 
-    if (snap.empty) { console.log('[TG AUTO] Nenhum usuário com grupo Telegram configurado.'); return; }
+    // Busca todos os usuários com tgGroupId configurado + admin config
+    const groups = [];
 
-    for (const doc of snap.docs) {
-      const { tgGroupId, tgPrefix, name } = doc.data();
-      if (!tgGroupId || !tgPrefix) continue;
+    // Admin
+    if (admData.tgGroupId && admData.tgPrefix) {
+      groups.push({ groupId: admData.tgGroupId, prefix: admData.tgPrefix, guildName: admData.guildName || 'GUILD', uploadedBy: 'auto', sharedDocId: (admData.guildName || 'GUILD').toUpperCase().replace(/\s+/g,'_') });
+    }
+
+    // Usuários comuns
+    const snap = await db.collection('guild_users').where('tgGroupId', '!=', null).get();
+    snap.docs.forEach(doc => {
+      const d = doc.data();
+      if (d.tgGroupId && d.tgPrefix) {
+        groups.push({ groupId: d.tgGroupId, prefix: d.tgPrefix, guildName: d.guildName || 'GUILD', uploadedBy: d.email || 'auto', sharedDocId: (d.guildName || 'GUILD').toUpperCase().replace(/\s+/g,'_'), docId: doc.id });
+      }
+    });
+
+    if (!groups.length) { console.log('[TG AUTO] Nenhum grupo configurado.'); return; }
+
+    // Deduplica por groupId (evita chamar o mesmo grupo 2x)
+    const seen = new Set();
+    for (const g of groups) {
+      if (seen.has(g.groupId)) continue;
+      seen.add(g.groupId);
       try {
-        console.log(`[TG AUTO] Atualizando "${name}" — grupo ${tgGroupId}...`);
-        const result = await sendCommandAndWaitXlsx(tgGroupId, tgPrefix);
-        // Salva os dados no Firestore para o usuário acessar
-        await db.collection('guild_users').doc(doc.id).update({
-          tgLastUpdate: new Date().toISOString(),
-          tgLastFile:   result.fileName,
-        });
-        console.log(`[TG AUTO] ✅ "${name}" atualizado: ${result.fileName}`);
+        console.log(`[TG AUTO] Atualizando grupo ${g.groupId} (${g.guildName})...`);
+        const result  = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
+        const allData = xlsxJsonToAllData(result.data);
+        const savedAt = new Date().toISOString();
+
+        // Salva no shared_reports para o front-end detectar via onSnapshot
+        await db.collection('shared_reports').doc(g.sharedDocId).set({
+          data:       allData,
+          filename:   result.fileName,
+          uploadedBy: 'auto-update',
+          guildName:  g.guildName,
+          savedAt,
+        }, { merge: true });
+
+        // Atualiza campo tgLastUpdate no guild_users se for usuário comum
+        if (g.docId) {
+          await db.collection('guild_users').doc(g.docId).update({ tgLastUpdate: savedAt, tgLastFile: result.fileName });
+        }
+
+        console.log(`[TG AUTO] ✅ ${g.guildName} atualizado: ${result.fileName} (${allData.length} membros)`);
       } catch(e) {
-        console.warn(`[TG AUTO] ❌ "${name}": ${e.message}`);
+        console.warn(`[TG AUTO] ❌ grupo ${g.groupId}: ${e.message}`);
       }
     }
     _tgLastUpdateAt = Date.now();
