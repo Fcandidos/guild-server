@@ -1123,16 +1123,86 @@ app.post('/api/telegram/update-stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/telegram/health — status do cliente Telegram
+// GET /api/telegram/health — status do cliente Telegram + timer
 app.get('/api/telegram/health', requireAdmin, async (req, res) => {
   const client = await getTgClient();
-  res.json({ ok: !!client, connected: !!client });
+  const now    = Date.now();
+  const nextAt = _tgLastUpdateAt + _tgIntervalMs;
+  const secsLeft = Math.max(0, Math.floor((nextAt - now) / 1000));
+  res.json({ ok: !!client, connected: !!client, lastUpdateAt: _tgLastUpdateAt, secondsLeft: secsLeft });
 });
 
+// GET /api/telegram/timer — tempo restante (sem auth, para o browser consultar)
+app.get('/api/telegram/timer', async (req, res) => {
+  const now      = Date.now();
+  const nextAt   = _tgLastUpdateAt + _tgIntervalMs;
+  const secsLeft = Math.max(0, Math.floor((nextAt - now) / 1000));
+  res.json({ lastUpdateAt: _tgLastUpdateAt, secondsLeft: secsLeft, intervalMs: _tgIntervalMs });
+});
+
+// ── Auto-update configurável no servidor ──────────────────────
+let _tgIntervalMs   = 30 * 60 * 1000; // padrão 30 min
+let _tgLastUpdateAt = Date.now();
+let _tgAutoRunning  = false;
+let _tgAutoTimer    = null;
+
+// POST /api/telegram/set-interval — configura intervalo
+app.post('/api/telegram/set-interval', requireAdmin, (req, res) => {
+  const mins = parseInt(req.body.intervalMinutes);
+  if (!mins || mins < 5) return res.status(400).json({ error: 'Mínimo 5 minutos' });
+  _tgIntervalMs   = mins * 60 * 1000;
+  _tgLastUpdateAt = Date.now();
+  if (_tgAutoTimer) clearInterval(_tgAutoTimer);
+  _tgAutoTimer = setInterval(tgAutoUpdate, _tgIntervalMs);
+  console.log(`[TG] Intervalo atualizado para ${mins} min`);
+  res.json({ ok: true, intervalMinutes: mins });
+});
+
+async function tgAutoUpdate() {
+  if (_tgAutoRunning) return;
+  _tgAutoRunning = true;
+  console.log('[TG AUTO] Iniciando atualização automática...');
+  try {
+    // Busca todos os usuários com tgGroupId configurado
+    const snap = await db.collection('guild_users')
+      .where('tgGroupId', '!=', null)
+      .get();
+
+    if (snap.empty) { console.log('[TG AUTO] Nenhum usuário com grupo Telegram configurado.'); return; }
+
+    for (const doc of snap.docs) {
+      const { tgGroupId, tgPrefix, name } = doc.data();
+      if (!tgGroupId || !tgPrefix) continue;
+      try {
+        console.log(`[TG AUTO] Atualizando "${name}" — grupo ${tgGroupId}...`);
+        const result = await sendCommandAndWaitXlsx(tgGroupId, tgPrefix);
+        // Salva os dados no Firestore para o usuário acessar
+        await db.collection('guild_users').doc(doc.id).update({
+          tgLastUpdate: new Date().toISOString(),
+          tgLastFile:   result.fileName,
+        });
+        console.log(`[TG AUTO] ✅ "${name}" atualizado: ${result.fileName}`);
+      } catch(e) {
+        console.warn(`[TG AUTO] ❌ "${name}": ${e.message}`);
+      }
+    }
+    _tgLastUpdateAt = Date.now();
+  } catch(e) {
+    console.error('[TG AUTO] Erro:', e.message);
+  } finally {
+    _tgAutoRunning = false;
+  }
+}
+
 // ── Inicia servidor ────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ GUILD SVE Server rodando na porta ${PORT}`);
   console.log(`   Projeto Firebase : ${process.env.FIREBASE_PROJECT_ID}`);
   console.log(`   Admin e-mail     : ${process.env.ADMIN_EMAIL}`);
   console.log(`   CORS origin      : ${_rawOrigins}`);
+
+  // Inicia cliente Telegram e timer automático
+  await getTgClient();
+  _tgAutoTimer = setInterval(tgAutoUpdate, _tgIntervalMs);
+  console.log(`   Telegram auto-update: a cada ${_tgIntervalMs / 60000} min`);
 });
