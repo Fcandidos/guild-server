@@ -1084,8 +1084,24 @@ async function sendCommandAndWaitXlsx(groupId, prefix, timeoutMs = 60000) {
       const fileName = fileAttr?.fileName || '';
       if (!fileName.endsWith('.xlsx')) continue;
 
-      const buffer = await client.downloadMedia(msg);
-      if (!buffer) continue;
+      // Download com retry em caso de timeout
+      let buffer = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          console.log(`📥 Download tentativa ${attempt}/3: ${fileName}`);
+          buffer = await client.downloadMedia(msg, { workers: 1 });
+          if (buffer) break;
+        } catch(e) {
+          console.warn(`⚠️ Download tentativa ${attempt} falhou: ${e.message}`);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+      if (!buffer) {
+        console.error('❌ Download falhou após 3 tentativas');
+        // Deleta as mensagens mesmo assim para não deixar lixo
+        try { await client.deleteMessages(entity, toDelete, { revoke: true }); } catch(_) {}
+        throw new Error('Falha ao baixar o arquivo do Telegram após 3 tentativas');
+      }
 
       const wb   = XLSX.read(buffer, { type: 'buffer' });
       const data = {};
@@ -1098,7 +1114,7 @@ async function sendCommandAndWaitXlsx(groupId, prefix, timeoutMs = 60000) {
         await client.deleteMessages(entity, toDelete, { revoke: true });
         console.log(`🗑️ ${toDelete.length} msg(s) deletada(s)`);
       } catch(e) {
-        console.warn('⚠️ Falha ao deletar:', e.message);
+        console.warn('⚠️ Falha ao deletar lote, tentando uma a uma:', e.message);
         for (const id of toDelete) {
           try { await client.deleteMessages(entity, [id], { revoke: true }); } catch(_) {}
         }
