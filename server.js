@@ -1327,6 +1327,21 @@ app.listen(PORT, async () => {
 
   // Inicia cliente Telegram e timer automático
   await getTgClient();
+
+  // Recupera intervalo configurado pelo admin no Firestore — persiste entre restarts do Render
+  try {
+    const adminSnap = await db.collection('shared_reports').doc('ADMIN_CONFIG').get();
+    if (adminSnap.exists) {
+      const saved = adminSnap.data().tgInterval;
+      if (saved && saved >= 5) {
+        _tgIntervalMs = saved * 60 * 1000;
+        console.log(`   Intervalo recuperado do Firestore: ${saved} min`);
+      }
+    }
+  } catch(e) {
+    console.warn(`   [TG] Falha ao recuperar intervalo do Firestore: ${e.message}`);
+  }
+
   _tgAutoTimer = setInterval(tgAutoUpdate, _tgIntervalMs);
   console.log(`   Telegram auto-update: a cada ${_tgIntervalMs / 60000} min`);
 });
