@@ -20,6 +20,10 @@ const helmet     = require('helmet');
 const rateLimit  = require('express-rate-limit');
 const admin      = require('firebase-admin');
 const nodemailer = require('nodemailer');
+const XLSX       = require('xlsx');
+const { TelegramClient } = require('telegram');
+const { StringSession }  = require('telegram/sessions');
+const { Api }            = require('telegram');
 
 // ── Nodemailer — Gmail (porta 587 TLS — compatível com Render) ──
 const _mailer = nodemailer.createTransport({
@@ -1011,6 +1015,118 @@ app.post('/api/admin/notify-improvements', requireAdmin, async (req, res) => {
     console.error('[NOTIFY]', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  TELEGRAM — Monitor de grupos via MTProto
+// ═══════════════════════════════════════════════════════════════
+let _tgClient = null;
+
+async function getTgClient() {
+  if (_tgClient) return _tgClient;
+  const session = process.env.TG_SESSION || '';
+  const apiId   = parseInt(process.env.TG_API_ID);
+  const apiHash = process.env.TG_API_HASH;
+  if (!session || !apiId || !apiHash) return null;
+  try {
+    const client = new TelegramClient(
+      new StringSession(session),
+      apiId, apiHash,
+      { connectionRetries: 5, retryDelay: 1000 }
+    );
+    await client.connect();
+    _tgClient = client;
+    console.log('✅ Telegram client conectado');
+    return client;
+  } catch(e) {
+    console.error('❌ Telegram client erro:', e.message);
+    return null;
+  }
+}
+
+async function sendCommandAndWaitXlsx(groupId, prefix, timeoutMs = 60000) {
+  const client = await getTgClient();
+  if (!client) throw new Error('Telegram não conectado — verifique TG_SESSION no Render');
+
+  const cmd    = `${prefix}stats all`;
+  const entity = await client.getEntity(groupId);
+
+  const before = await client.getMessages(entity, { limit: 1 });
+  let lastId   = before[0]?.id || 0;
+
+  const sentMsg  = await client.sendMessage(entity, { message: cmd });
+  const toDelete = [sentMsg.id];
+  console.log(`📤 Telegram: "${cmd}" enviado (id=${sentMsg.id})`);
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+
+    const history = await client.invoke(new Api.messages.GetHistory({
+      peer: entity, offsetId: 0, offsetDate: 0, addOffset: 0,
+      limit: 10, maxId: 0, minId: lastId, hash: BigInt(0),
+    }));
+
+    const novas = (history.messages || [])
+      .filter(m => m.id > lastId)
+      .sort((a, b) => a.id - b.id);
+
+    if (novas.length > 0) {
+      lastId = Math.max(lastId, ...novas.map(m => m.id));
+      novas.forEach(m => {
+        if (!toDelete.includes(m.id)) toDelete.push(m.id);
+      });
+    }
+
+    for (const msg of novas) {
+      const doc      = msg.media?.document;
+      const fileAttr = doc ? (doc.attributes||[]).find(a => a.className === 'DocumentAttributeFilename') : null;
+      const fileName = fileAttr?.fileName || '';
+      if (!fileName.endsWith('.xlsx')) continue;
+
+      const buffer = await client.downloadMedia(msg);
+      if (!buffer) continue;
+
+      const wb   = XLSX.read(buffer, { type: 'buffer' });
+      const data = {};
+      wb.SheetNames.forEach(sheet => {
+        data[sheet] = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' });
+      });
+
+      // Deleta mensagens do grupo
+      try {
+        await client.deleteMessages(entity, toDelete, { revoke: true });
+        console.log(`🗑️ ${toDelete.length} msg(s) deletada(s)`);
+      } catch(e) {
+        console.warn('⚠️ Falha ao deletar:', e.message);
+        for (const id of toDelete) {
+          try { await client.deleteMessages(entity, [id], { revoke: true }); } catch(_) {}
+        }
+      }
+
+      return { ok: true, fileName, data };
+    }
+  }
+  throw new Error('Timeout — xlsx não chegou em 60s');
+}
+
+// POST /api/telegram/update-stats — busca xlsx via Telegram
+app.post('/api/telegram/update-stats', requireAdmin, async (req, res) => {
+  const { groupId, prefix } = req.body;
+  if (!groupId || !prefix) return res.status(400).json({ error: 'groupId e prefix obrigatórios' });
+  try {
+    const result = await sendCommandAndWaitXlsx(groupId, prefix);
+    res.json(result);
+  } catch(e) {
+    console.error('[TELEGRAM]', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/telegram/health — status do cliente Telegram
+app.get('/api/telegram/health', requireAdmin, async (req, res) => {
+  const client = await getTgClient();
+  res.json({ ok: !!client, connected: !!client });
 });
 
 // ── Inicia servidor ────────────────────────────────────────────
