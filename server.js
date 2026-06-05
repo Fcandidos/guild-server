@@ -1132,6 +1132,61 @@ app.get('/api/telegram/health', requireAdmin, async (req, res) => {
   res.json({ ok: !!client, connected: !!client, lastUpdateAt: _tgLastUpdateAt, secondsLeft: secsLeft });
 });
 
+// POST /api/telegram/find-group — descobre ID do grupo pelo link de convite
+app.post('/api/telegram/find-group', requireAdmin, async (req, res) => {
+  const { inviteLink } = req.body;
+  if (!inviteLink) return res.status(400).json({ error: 'inviteLink obrigatório' });
+
+  const client = await getTgClient();
+  if (!client) return res.status(503).json({ error: 'Telegram não conectado' });
+
+  try {
+    // Extrai hash do link (t.me/+HASH ou t.me/joinchat/HASH)
+    const hashMatch = inviteLink.match(/(?:t\.me\/\+|t\.me\/joinchat\/)([A-Za-z0-9_-]+)/);
+
+    if (hashMatch) {
+      const hash = hashMatch[1];
+      // Tenta verificar sem entrar (retorna ID se já for membro)
+      try {
+        const check = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+        if (check.className === 'ChatInviteAlready' && check.chat) {
+          const c = check.chat;
+          const id = c.megagroup || c.broadcast ? -(1000000000000 + Number(c.id)) : -Number(c.id);
+          return res.json({ ok: true, groupId: id, name: c.title, type: c.className });
+        }
+        // Se ChatInvite (não é membro), tenta entrar para obter o ID
+        const joined = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+        const chat = (joined.chats || [])[0];
+        if (chat) {
+          const id = chat.megagroup || chat.broadcast ? -(1000000000000 + Number(chat.id)) : -Number(chat.id);
+          return res.json({ ok: true, groupId: id, name: chat.title, type: chat.className });
+        }
+      } catch(e) {
+        if (e.message?.includes('INVITE_HASH_EXPIRED')) return res.status(400).json({ error: 'Link expirado' });
+        if (e.message?.includes('USER_ALREADY_PARTICIPANT')) {
+          // Já é membro — busca nos diálogos
+        }
+        throw e;
+      }
+    }
+
+    // Tenta como username público (@grupname)
+    const usernameMatch = inviteLink.match(/t\.me\/([A-Za-z0-9_]+)/);
+    if (usernameMatch) {
+      const entity = await client.getEntity(usernameMatch[1]);
+      if (entity) {
+        const id = entity.megagroup || entity.broadcast ? -(1000000000000 + Number(entity.id)) : -Number(entity.id);
+        return res.json({ ok: true, groupId: id, name: entity.title, type: entity.className });
+      }
+    }
+
+    res.status(400).json({ error: 'Não foi possível encontrar o grupo. Verifique o link.' });
+  } catch(e) {
+    console.error('[find-group]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/telegram/timer — tempo restante (sem auth, para o browser consultar)
 app.get('/api/telegram/timer', async (req, res) => {
   const now      = Date.now();
