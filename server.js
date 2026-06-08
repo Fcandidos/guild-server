@@ -1127,7 +1127,7 @@ async function sendCommandAndWaitXlsx(groupId, prefix, timeoutMs = 60000) {
 }
 
 // POST /api/telegram/update-stats — busca xlsx via Telegram
-app.post('/api/telegram/update-stats', requireAdmin, async (req, res) => {
+app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
   const { groupId, prefix } = req.body;
   if (!groupId || !prefix) return res.status(400).json({ error: 'groupId e prefix obrigatórios' });
   try {
