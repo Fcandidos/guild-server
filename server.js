@@ -21,6 +21,7 @@ const rateLimit  = require('express-rate-limit');
 const admin      = require('firebase-admin');
 const nodemailer = require('nodemailer');
 const XLSX       = require('xlsx');
+const cron       = require('node-cron');
 const { TelegramClient } = require('telegram');
 const { StringSession }  = require('telegram/sessions');
 const { Api }            = require('telegram');
@@ -1326,6 +1327,108 @@ async function tgAutoUpdate() {
     _tgAutoRunning = false;
   }
 }
+
+// ── Helpers para jobs agendados ───────────────────────────────
+
+// Retorna data no fuso de Brasília (UTC-3) como string YYYY-MM-DD
+function getBRTDateStr(offsetDays = 0) {
+  const d = new Date();
+  d.setUTCHours(d.getUTCHours() - 3);
+  if (offsetDays) d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
+
+// Retorna todas as guilds com Telegram configurado (admin + usuários)
+async function _getConfiguredGuilds() {
+  const guilds = [];
+  const adminSnap = await db.collection('shared_reports').doc('ADMIN_CONFIG').get();
+  if (adminSnap.exists()) {
+    const d = adminSnap.data();
+    if (d.tgGroupId && d.tgPrefix) {
+      const gn = d.guildName || 'GUILD';
+      guilds.push({ groupId: d.tgGroupId, prefix: d.tgPrefix, guildName: gn,
+        sharedDocId: gn.toUpperCase().replace(/\s+/g,'_'), isAdmin: true });
+    }
+  }
+  const snap = await db.collection('guild_users').where('tgGroupId', '!=', null).get();
+  snap.docs.forEach(doc => {
+    const d = doc.data();
+    if (!d.tgGroupId || !d.tgPrefix) return;
+    const gn = d.guildName || 'GUILD';
+    guilds.push({ groupId: d.tgGroupId, prefix: d.tgPrefix, guildName: gn,
+      sharedDocId: gn.toUpperCase().replace(/\s+/g,'_'), docId: doc.id });
+  });
+  return guilds;
+}
+
+// ── Job 23:55 BRT — última atualização da semana ──────────────
+cron.schedule('55 23 * * *', async () => {
+  const today = getBRTDateStr();
+  console.log(`[CRON 23:55] Verificando guilds para atualização final (${today})...`);
+  try {
+    const guilds = await _getConfiguredGuilds();
+    let disparou = 0;
+    for (const g of guilds) {
+      const sharedSnap = await db.collection('shared_reports').doc(g.sharedDocId).get();
+      if (!sharedSnap.exists()) continue;
+      const goals = (sharedSnap.data().goals || {});
+      if (goals.goalDateEnd !== today) continue;
+      console.log(`[CRON 23:55] Última atualização da semana → ${g.guildName}`);
+      try {
+        const result  = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
+        const allData = xlsxJsonToAllData(result.data);
+        const savedAt = new Date().toISOString();
+        await db.collection('shared_reports').doc(g.sharedDocId).set(
+          { data: allData, filename: result.fileName, uploadedBy: 'cron-final', guildName: g.guildName, savedAt },
+          { merge: true }
+        );
+        if (g.isAdmin) {
+          await db.collection('shared_reports').doc('ADMIN_CONFIG').update({ tgLastUpdate: savedAt });
+          _tgLastUpdateAt = Date.now();
+        } else if (g.docId) {
+          await db.collection('guild_users').doc(g.docId).update({ tgLastUpdate: savedAt });
+        }
+        console.log(`[CRON 23:55] ✅ ${g.guildName}: relatório final gerado (${result.fileName})`);
+        disparou++;
+      } catch(e) {
+        console.warn(`[CRON 23:55] ❌ ${g.guildName}: ${e.message}`);
+      }
+    }
+    if (!disparou) console.log('[CRON 23:55] Nenhuma guild termina hoje.');
+  } catch(e) {
+    console.error('[CRON 23:55] Erro:', e.message);
+  }
+}, { timezone: 'America/Sao_Paulo' });
+
+// ── Job 00:01 BRT — virada de semana ─────────────────────────
+cron.schedule('1 0 * * *', async () => {
+  const yesterday = getBRTDateStr(-1);
+  console.log(`[CRON 00:01] Verificando virada de semana (fim: ${yesterday})...`);
+  try {
+    const guilds = await _getConfiguredGuilds();
+    let virou = 0;
+    for (const g of guilds) {
+      const sharedSnap = await db.collection('shared_reports').doc(g.sharedDocId).get();
+      if (!sharedSnap.exists()) continue;
+      const goals = (sharedSnap.data().goals || {});
+      if (goals.goalDateEnd !== yesterday) continue;
+      const oldEnd   = new Date(yesterday + 'T12:00:00Z');
+      const newStart = new Date(oldEnd); newStart.setUTCDate(newStart.getUTCDate() + 1);
+      const newEnd   = new Date(newStart); newEnd.setUTCDate(newEnd.getUTCDate() + 6);
+      const newStartStr = newStart.toISOString().slice(0, 10);
+      const newEndStr   = newEnd.toISOString().slice(0, 10);
+      await db.collection('shared_reports').doc(g.sharedDocId).update({
+        'goals.goalDateStart': newStartStr,
+        'goals.goalDateEnd':   newEndStr,
+      });
+      console.log(`[CRON 00:01] ✅ ${g.guildName}: nova semana ${newStartStr} – ${newEndStr}`);
+      virou++;
+    }
+    if (!virou) console.log('[CRON 00:01] Nenhuma guild virou semana hoje.');
+  } catch(e) {
+    console.error('[CRON 00:01] Erro:', e.message);
+  }
+}, { timezone: 'America/Sao_Paulo' });
 
 // ── Inicia servidor ────────────────────────────────────────────
 app.listen(PORT, async () => {
