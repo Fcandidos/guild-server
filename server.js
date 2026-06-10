@@ -1300,12 +1300,33 @@ async function tgAutoUpdate() {
       seen.add(g.groupId);
       try {
         console.log(`[TG AUTO] Atualizando ${g.guildName} (grupo ${g.groupId})...`);
-        const result  = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
-        const allData = xlsxJsonToAllData(result.data);
-        const savedAt = new Date().toISOString();
+        const result    = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
+        const freshData = xlsxJsonToAllData(result.data);
+        const savedAt   = new Date().toISOString();
+
+        // Filtra o novo arquivo para só incluir membros que já estão no relatório atual.
+        // Isso evita que o auto-update adicione de volta membros que o admin removeu manualmente.
+        let finalData = freshData;
+        try {
+          const currentSnap = await db.collection('shared_reports').doc(g.sharedDocId).get();
+          if (currentSnap.exists) {
+            const currentMembers = currentSnap.data().data || [];
+            if (currentMembers.length > 0) {
+              const currentIds = new Set(
+                currentMembers.map(m => String(m.userId || m.name || '').toLowerCase().trim())
+                  .filter(Boolean)
+              );
+              const filtered = freshData.filter(m =>
+                currentIds.has(String(m.userId || m.name || '').toLowerCase().trim())
+              );
+              // Só aplica o filtro se houver overlap — na primeira execução usa todos
+              if (filtered.length > 0) finalData = filtered;
+            }
+          }
+        } catch(e) { console.warn('[TG AUTO] Aviso ao filtrar membros:', e.message); }
 
         await db.collection('shared_reports').doc(g.sharedDocId).set({
-          data: allData, filename: result.fileName, uploadedBy: 'auto-update',
+          data: finalData, filename: result.fileName, uploadedBy: 'auto-update',
           guildName: g.guildName, savedAt,
         }, { merge: true });
 
@@ -1375,11 +1396,23 @@ cron.schedule('55 23 * * *', async () => {
       if (goals.goalDateEnd !== today) continue;
       console.log(`[CRON 23:55] Última atualização da semana → ${g.guildName}`);
       try {
-        const result  = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
-        const allData = xlsxJsonToAllData(result.data);
-        const savedAt = new Date().toISOString();
+        const result     = await sendCommandAndWaitXlsx(g.groupId, g.prefix);
+        const freshData  = xlsxJsonToAllData(result.data);
+        const savedAt    = new Date().toISOString();
+        // Mesma lógica do auto-update: só atualiza membros já presentes no relatório
+        let finalData = freshData;
+        const currentMembers = sharedSnap.data().data || [];
+        if (currentMembers.length > 0) {
+          const currentIds = new Set(
+            currentMembers.map(m => String(m.userId || m.name || '').toLowerCase().trim()).filter(Boolean)
+          );
+          const filtered = freshData.filter(m =>
+            currentIds.has(String(m.userId || m.name || '').toLowerCase().trim())
+          );
+          if (filtered.length > 0) finalData = filtered;
+        }
         await db.collection('shared_reports').doc(g.sharedDocId).set(
-          { data: allData, filename: result.fileName, uploadedBy: 'cron-final', guildName: g.guildName, savedAt },
+          { data: finalData, filename: result.fileName, uploadedBy: 'cron-final', guildName: g.guildName, savedAt },
           { merge: true }
         );
         if (g.isAdmin) {
