@@ -1473,6 +1473,19 @@ app.listen(PORT, async () => {
   // Inicia cliente Telegram e timer automático
   await getTgClient();
 
+  // Restaura intervalo e último update do Firestore — evita reverter para 30min após restart
+  try {
+    const cfg = await db.collection('shared_reports').doc('ADMIN_CONFIG').get();
+    if (cfg.exists) {
+      const d = cfg.data();
+      if (d.tgInterval)    _tgIntervalMs   = d.tgInterval * 60 * 1000;
+      if (d.tgLastUpdate)  _tgLastUpdateAt  = new Date(d.tgLastUpdate).getTime();
+      console.log(`   Telegram config restaurado: intervalo=${d.tgInterval || 30}min, último update=${d.tgLastUpdate || 'nunca'}`);
+    }
+  } catch(e) {
+    console.warn('   [INIT] Não foi possível restaurar config Telegram do Firestore:', e.message);
+  }
+
   // Tick a cada 30 min — cada guild decide internamente se é hora de atualizar
   // com base no seu próprio tgInterval configurado
   _tgAutoTimer = setInterval(tgAutoUpdate, 30 * 60 * 1000);
