@@ -324,6 +324,56 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2026-06-04-v3' });
 });
 
+// ── POST /api/security/event — registra evento de segurança ──────
+// Sem auth obrigatório (falhas pré-login precisam ser registradas).
+// Proteção contra flood: global rate limiter (60/min por IP já configurado).
+// userAgent vem do header HTTP — mais confiável que body do cliente.
+app.post('/api/security/event', async (req, res) => {
+  const ALLOWED = ['login_failed','password_reset','account_locked','session_expired','unauthorized_access'];
+  const { type, email, errorCode } = req.body;
+  if (!type || !ALLOWED.includes(type)) {
+    return res.status(400).json({ error: 'Tipo de evento inválido' });
+  }
+  try {
+    await db.collection('security_events').add({
+      ts:        new Date().toISOString(),
+      type,
+      email:     String(email     || '').slice(0, 200),
+      errorCode: String(errorCode || '').slice(0, 60),
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 250),
+    });
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ ok: false });
+  }
+});
+
+// ── POST /api/admin/migrate-guild-claims — define guildId claim para todos os usuários ──
+// Executar UMA VEZ após deploy. Após confirmar sucesso, remover || userGuildId() == null das rules.
+app.post('/api/admin/migrate-guild-claims', requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.collection('guild_users').get();
+    let ok = 0, skipped = 0;
+    const errors = [];
+    for (const doc of snap.docs) {
+      const { uid, guildName } = doc.data();
+      if (!uid || !guildName) { skipped++; continue; }
+      try {
+        const guildId = _normalizeGuildId(guildName);
+        await auth.setCustomUserClaims(uid, { guildId });
+        console.log(`[MIGRATE CLAIMS] uid=${uid} guildId=${guildId}`);
+        ok++;
+      } catch(e) {
+        errors.push({ uid, error: e.message });
+      }
+    }
+    res.json({ ok, skipped, errors, total: snap.docs.length });
+  } catch(e) {
+    console.error('[MIGRATE CLAIMS]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GET /test-email — testa envio de email (admin only) ─────────
 app.get('/test-email', requireAdmin, async (req, res) => {
   const to = req.query.to || process.env.GMAIL_USER;
@@ -346,6 +396,14 @@ app.get('/api/users', requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Normaliza guildName → docId (igual a _sharedDocId() no frontend)
+function _normalizeGuildId(guildName) {
+  return (guildName || '').toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^A-Z0-9_\-]/g, c => '_' + c.charCodeAt(0) + '_')
+    || 'DEFAULT';
+}
 
 // Gera senha aleatória segura de 10 caracteres
 function _generatePassword() {
@@ -385,7 +443,11 @@ app.post('/api/users', requireAdmin, async (req, res) => {
       displayName: name,
     });
 
-    // 2. Salva dados extras no Firestore
+    // 2. Define custom claim guildId para isolamento de tenant no Firestore
+    const guildId = _normalizeGuildId(guildName);
+    await auth.setCustomUserClaims(userRecord.uid, { guildId });
+
+    // 3. Salva dados extras no Firestore
     const docRef = await db.collection('guild_users').add({
       uid:         userRecord.uid,
       name,
@@ -395,7 +457,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
       firstAccess: true,
     });
 
-    // 3. Responde imediatamente e envia email em background (evita timeout)
+    // 4. Responde imediatamente e envia email em background (evita timeout)
     res.status(201).json({
       message:   'Usuário criado com sucesso',
       id:        docRef.id,
@@ -573,9 +635,19 @@ app.patch('/api/users/:id/guild', requireAdmin, async (req, res) => {
   }
 
   try {
+    const docSnap = await db.collection('guild_users').doc(id).get();
+    if (!docSnap.exists) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const { uid } = docSnap.data();
+
     await db.collection('guild_users').doc(id).update({
       guildName: guildName.toUpperCase(),
     });
+
+    // Atualiza custom claim para refletir nova guild (token do usuário precisará refresh)
+    if (uid) {
+      await auth.setCustomUserClaims(uid, { guildId: _normalizeGuildId(guildName) });
+    }
+
     res.json({ message: 'Guild atualizada' });
   } catch (e) {
     console.error('[PATCH /api/users/:id/guild]', e);
