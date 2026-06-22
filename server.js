@@ -324,8 +324,8 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2026-06-04-v3' });
 });
 
-// ── GET /test-email — testa envio de email (temporário, sem auth) ─
-app.get('/test-email', async (req, res) => {
+// ── GET /test-email — testa envio de email (admin only) ─────────
+app.get('/test-email', requireAdmin, async (req, res) => {
   const to = req.query.to || process.env.GMAIL_USER;
   try {
     await sendWelcomeEmail({ to, userName: 'Teste', guildName: 'GUILD TESTE', password: 'SENHA123' });
@@ -618,6 +618,38 @@ app.get('/api/me', authLimiter, requireAuth, async (req, res) => {
     res.json({ id: docRef.id, ...docRef.data() });
   } catch (e) {
     console.error('[GET /api/me]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/trial/activate — ativa trial de 1h (self-service, uma vez) ──
+// O servidor controla a expiração — cliente não pode manipular o valor
+app.post('/api/trial/activate', requireAuth, async (req, res) => {
+  const uid = req.decodedToken.uid;
+  try {
+    const snap = await db.collection('guild_users').where('uid', '==', uid).get();
+    if (snap.empty) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const docRef = snap.docs[0].ref;
+    const data   = snap.docs[0].data();
+
+    if (data.trialUsed) {
+      return res.status(409).json({ error: 'Trial já utilizado' });
+    }
+
+    const now       = new Date();
+    const expiresAt = new Date(now.getTime() + 3600000); // exatamente 1h — server-controlled
+
+    await docRef.update({
+      trialUsed:      true,
+      trialStartedAt: now,
+      trialExpiresAt: expiresAt,
+    });
+
+    console.log(`[TRIAL] uid=${uid} trial ativado → expira ${expiresAt.toISOString()}`);
+    res.json({ ok: true, expiresAt: expiresAt.toISOString() });
+  } catch (e) {
+    console.error('[TRIAL ACTIVATE]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
