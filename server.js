@@ -449,11 +449,13 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await auth.setCustomUserClaims(userRecord.uid, { guildId });
 
     // 3. Salva dados extras no Firestore
+    const allowedRoles = ['member', 'viewer', 'lider'];
     const docRef = await db.collection('guild_users').add({
       uid:         userRecord.uid,
       name,
       email:       email.toLowerCase(),
       guildName:   guildName.toUpperCase(),
+      role:        allowedRoles.includes(role) ? role : 'member',
       createdAt:   new Date().toLocaleDateString('pt-BR'),
       firstAccess: true,
     });
