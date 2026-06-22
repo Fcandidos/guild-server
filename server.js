@@ -408,8 +408,9 @@ function _normalizeGuildId(guildName) {
 // Gera senha aleatória segura de 10 caracteres
 function _generatePassword() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#';
+  const { randomInt } = require('crypto');
   let pass = '';
-  for (let i = 0; i < 10; i++) pass += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 10; i++) pass += chars[randomInt(chars.length)];
   return pass;
 }
 
@@ -1235,6 +1236,24 @@ async function sendCommandAndWaitXlsx(groupId, prefix, timeoutMs = 60000) {
 app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
   const { groupId, prefix } = req.body;
   if (!groupId || !prefix) return res.status(400).json({ error: 'groupId e prefix obrigatórios' });
+
+  // Valida que o groupId pertence à guild do usuário autenticado
+  const uid = req.decodedToken.uid;
+  const adminEmail = process.env.ADMIN_EMAIL || '';
+  const isAdmin = req.decodedToken.email?.toLowerCase() === adminEmail.toLowerCase();
+  if (!isAdmin) {
+    try {
+      const userDoc = await db.collection('guild_users').doc(uid).get();
+      const userData = userDoc.data() || {};
+      const allowedGroupId = String(userData.tgGroupId || '');
+      if (!allowedGroupId || allowedGroupId !== String(groupId)) {
+        return res.status(403).json({ error: 'Grupo não autorizado para este usuário' });
+      }
+    } catch(e) {
+      return res.status(500).json({ error: 'Erro ao validar permissão do grupo' });
+    }
+  }
+
   try {
     const result = await sendCommandAndWaitXlsx(groupId, prefix);
     res.json(result);
@@ -1308,8 +1327,8 @@ app.post('/api/telegram/find-group', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/telegram/timer — tempo restante (sem auth, para o browser consultar)
-app.get('/api/telegram/timer', async (req, res) => {
+// GET /api/telegram/timer — tempo restante
+app.get('/api/telegram/timer', requireAuth, async (req, res) => {
   const now      = Date.now();
   const nextAt   = _tgLastUpdateAt + _tgIntervalMs;
   const secsLeft = Math.max(0, Math.floor((nextAt - now) / 1000));
