@@ -1243,6 +1243,8 @@ app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
   const uid = req.decodedToken.uid;
   const adminEmail = process.env.ADMIN_EMAIL || '';
   const isAdmin = req.decodedToken.email?.toLowerCase() === adminEmail.toLowerCase();
+  let userDocId = null;
+  let userTodayDate = null;
   if (!isAdmin) {
     try {
       const userQuery = await db.collection('guild_users').where('uid', '==', uid).limit(1).get();
@@ -1252,6 +1254,8 @@ app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
       if (!allowedGroupId || allowedGroupId !== String(groupId)) {
         return res.status(403).json({ error: 'Grupo não autorizado para este usuário' });
       }
+      userDocId = userQuery.docs[0].id;
+      userTodayDate = userData.tgTodayDate || null;
     } catch(e) {
       return res.status(500).json({ error: 'Erro ao validar permissão do grupo' });
     }
@@ -1259,6 +1263,16 @@ app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
 
   try {
     const result = await sendCommandAndWaitXlsx(groupId, prefix);
+
+    // Incrementa contador diário de cliques no ATUALIZAR (fire-and-forget)
+    if (userDocId) {
+      const today = new Date().toISOString().split('T')[0];
+      const upd = userTodayDate === today
+        ? { tgTodayCount: admin.firestore.FieldValue.increment(1) }
+        : { tgTodayCount: 1, tgTodayDate: today };
+      db.collection('guild_users').doc(userDocId).update(upd).catch(() => {});
+    }
+
     res.json(result);
   } catch(e) {
     console.error('[TELEGRAM]', e.message);
