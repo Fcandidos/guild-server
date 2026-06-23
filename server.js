@@ -1245,8 +1245,9 @@ app.post('/api/telegram/update-stats', requireAuth, async (req, res) => {
   const isAdmin = req.decodedToken.email?.toLowerCase() === adminEmail.toLowerCase();
   if (!isAdmin) {
     try {
-      const userDoc = await db.collection('guild_users').doc(uid).get();
-      const userData = userDoc.data() || {};
+      const userQuery = await db.collection('guild_users').where('uid', '==', uid).limit(1).get();
+      if (userQuery.empty) return res.status(403).json({ error: 'Usuário não encontrado' });
+      const userData = userQuery.docs[0].data();
       const allowedGroupId = String(userData.tgGroupId || '');
       if (!allowedGroupId || allowedGroupId !== String(groupId)) {
         return res.status(403).json({ error: 'Grupo não autorizado para este usuário' });
