@@ -417,7 +417,7 @@ function _generatePassword() {
 // ── POST /api/users — cria usuário (admin) ────────────────────
 //  Body: { name, email, password (opcional), guildName }
 app.post('/api/users', requireAdmin, async (req, res) => {
-  const { name, email, guildName } = req.body;
+  const { name, email, guildName, role } = req.body;
   let { password } = req.body;
 
   // Se senha não informada, gera automaticamente
