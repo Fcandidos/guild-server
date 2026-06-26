@@ -348,6 +348,132 @@ app.post('/api/security/event', async (req, res) => {
   }
 });
 
+// ── PATCH /api/admin/guild-name — corrige o guildName de display para usuários existentes ──
+// Body: { oldName: "LXB", newName: "LxB" }
+// Atualiza apenas o campo guildName (display) sem alterar guildId claim nem docIds.
+app.patch('/api/admin/guild-name', requireAdmin, async (req, res) => {
+  const { oldName, newName } = req.body;
+  if (!oldName || !newName) {
+    return res.status(400).json({ error: 'oldName e newName obrigatórios' });
+  }
+
+  const oldUpper = oldName.toUpperCase().trim();
+  try {
+    const snap = await db.collection('guild_users').get();
+    let updated = 0;
+    const batch = db.batch();
+    for (const docSnap of snap.docs) {
+      const stored = (docSnap.data().guildName || '').toUpperCase().trim();
+      if (stored === oldUpper) {
+        batch.update(docSnap.ref, { guildName: newName });
+        updated++;
+      }
+    }
+    if (updated) await batch.commit();
+    console.log(`[RENAME] "${oldName}" → "${newName}" — ${updated} usuário(s) atualizados`);
+    res.json({ ok: true, oldName, newName, updated });
+  } catch(e) {
+    console.error('[RENAME guild-name]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/admin/guild-data?guildName=BR~ — mostra o que existe antes de deletar ──
+app.get('/api/admin/guild-data', requireAdmin, async (req, res) => {
+  const guildName = (req.query.guildName || '').trim();
+  if (!guildName) return res.status(400).json({ error: 'Query param guildName obrigatório' });
+
+  const guildId       = _normalizeGuildId(guildName);
+  const guildIdLegacy = guildName.toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^A-Z0-9_\-]/g, '') || 'DEFAULT';
+
+  const ids    = [...new Set([guildId, guildIdLegacy])];
+  const report = {};
+
+  for (const gid of ids) {
+    const item = { shared_report: false, entries: 0, member_goals: 0 };
+
+    const srSnap = await db.collection('shared_reports').doc(gid).get().catch(() => null);
+    if (srSnap?.exists) item.shared_report = true;
+
+    const enSnap = await db.collection('guild_history').doc(gid).collection('entries').get().catch(() => null);
+    if (enSnap) item.entries = enSnap.size;
+
+    const mgSnap = await db.collection('guild_history').doc(gid).collection('member_goals').get().catch(() => null);
+    if (mgSnap) item.member_goals = mgSnap.size;
+
+    report[gid] = item;
+  }
+
+  res.json({ guildName, ids, report });
+});
+
+// ── DELETE /api/admin/guild-data — limpa todos os dados de uma guild específica ──
+// Body: { guildName: "BR~" }
+// Remove: shared_reports, guild_history/entries, guild_history/member_goals (ambos IDs)
+app.delete('/api/admin/guild-data', requireAdmin, async (req, res) => {
+  const { guildName } = req.body;
+  if (!guildName || !guildName.trim()) {
+    return res.status(400).json({ error: 'guildName obrigatório' });
+  }
+
+  const guildId       = _normalizeGuildId(guildName);
+  const guildIdLegacy = guildName.toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^A-Z0-9_\-]/g, '') || 'DEFAULT';
+
+  const ids     = [...new Set([guildId, guildIdLegacy])];
+  const deleted = { shared_reports: [], guild_history_entries: [], guild_history_goals: [], guild_history_root: [] };
+
+  for (const gid of ids) {
+    // shared_reports/{gid}
+    try {
+      const docRef = db.collection('shared_reports').doc(gid);
+      const snap   = await docRef.get();
+      if (snap.exists) {
+        await docRef.delete();
+        deleted.shared_reports.push(gid);
+      }
+    } catch(e) { console.warn(`[PURGE] shared_reports/${gid}:`, e.message); }
+
+    // guild_history/{gid}/entries/*
+    try {
+      const entriesSnap = await db.collection('guild_history').doc(gid).collection('entries').get();
+      if (!entriesSnap.empty) {
+        const batch = db.batch();
+        entriesSnap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        deleted.guild_history_entries.push(`${gid} (${entriesSnap.size} docs)`);
+      }
+    } catch(e) { console.warn(`[PURGE] guild_history/${gid}/entries:`, e.message); }
+
+    // guild_history/{gid}/member_goals/*
+    try {
+      const goalsSnap = await db.collection('guild_history').doc(gid).collection('member_goals').get();
+      if (!goalsSnap.empty) {
+        const batch = db.batch();
+        goalsSnap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        deleted.guild_history_goals.push(`${gid} (${goalsSnap.size} docs)`);
+      }
+    } catch(e) { console.warn(`[PURGE] guild_history/${gid}/member_goals:`, e.message); }
+
+    // guild_history/{gid} (documento raiz)
+    try {
+      const rootRef  = db.collection('guild_history').doc(gid);
+      const rootSnap = await rootRef.get();
+      if (rootSnap.exists) {
+        await rootRef.delete();
+        deleted.guild_history_root.push(gid);
+      }
+    } catch(e) { console.warn(`[PURGE] guild_history/${gid}:`, e.message); }
+  }
+
+  console.log(`[PURGE] Guild "${guildName}" (${ids.join(', ')}) limpa:`, JSON.stringify(deleted));
+  res.json({ ok: true, guildName, ids, deleted });
+});
+
 // ── POST /api/admin/migrate-guild-claims — define guildId claim para todos os usuários ──
 // Executar UMA VEZ após deploy. Após confirmar sucesso, remover || userGuildId() == null das rules.
 app.post('/api/admin/migrate-guild-claims', requireAdmin, async (req, res) => {
@@ -454,7 +580,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
       uid:         userRecord.uid,
       name,
       email:       email.toLowerCase(),
-      guildName:   guildName.toUpperCase(),
+      guildName:   guildName,
       role:        allowedRoles.includes(role) ? role : 'member',
       createdAt:   new Date().toLocaleDateString('pt-BR'),
       firstAccess: true,
@@ -643,7 +769,7 @@ app.patch('/api/users/:id/guild', requireAdmin, async (req, res) => {
     const { uid } = docSnap.data();
 
     await db.collection('guild_users').doc(id).update({
-      guildName: guildName.toUpperCase(),
+      guildName: guildName,
     });
 
     // Atualiza custom claim para refletir nova guild (token do usuário precisará refresh)
